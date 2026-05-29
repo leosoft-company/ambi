@@ -40,6 +40,24 @@ async def test_invoke_success_sets_tool_name():
     assert res._tool_name == "echo"
 
 
+async def test_invoke_unknown_tool_returns_error_with_available_list():
+    reg = ToolRegistry()
+
+    async def h(args):
+        return "ok"
+
+    reg.register(_make_tool("known_one", h))
+    res = await reg.invoke("ghost", {})
+    assert res.is_error is True
+    assert "not registered" in res.content
+    assert "known_one" in res.content
+
+
+def test_kind_of_unknown_tool_defaults_to_read():
+    reg = ToolRegistry()
+    assert reg.kind("anything") == "read"
+
+
 async def test_invoke_handler_exception_becomes_error_result():
     reg = ToolRegistry()
 

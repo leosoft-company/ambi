@@ -24,11 +24,25 @@ class ToolRegistry:
         return [t.definition for t in self._tools.values()]
 
     def kind(self, name: str) -> ToolKind:
-        return self._tools[name].kind
+        tool = self._tools.get(name)
+        if tool is None:
+            # Defensive — if the model invents a tool name the agent loop
+            # shouldn't crash. Treat the call as a read.
+            return "read"
+        return tool.kind
 
     async def invoke(self, name: str, input: dict) -> ToolResultBlock:
+        tool = self._tools.get(name)
+        if tool is None:
+            available = ", ".join(sorted(self._tools.keys())) or "(none)"
+            return ToolResultBlock(
+                tool_use_id="",
+                content=f"Tool '{name}' is not registered. Available tools: {available}",
+                is_error=True,
+                _tool_name=name,
+            )
         try:
-            result = await self._tools[name].handler(input)
+            result = await tool.handler(input)
             return ToolResultBlock(tool_use_id="", content=result, _tool_name=name)
         except Exception as e:
             return ToolResultBlock(
