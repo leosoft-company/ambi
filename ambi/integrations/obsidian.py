@@ -82,7 +82,7 @@ def _render_frontmatter(meta: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _make_handlers(vault: Path):
+def _make_handlers(vault: Path, default_folder: str):
     async def save(args: dict) -> str:
         try:
             title = _safe_title(str(args.get("title") or ""))
@@ -91,15 +91,15 @@ def _make_handlers(vault: Path):
         content = args.get("content")
         if not isinstance(content, str) or not content.strip():
             return "Error: 'content' (non-empty string) is required."
-        folder = (args.get("folder") or "").strip("/")
+        # Default-to-Inbox: new notes land in the configured capture folder
+        # unless the caller explicitly named one. Keeps the vault root clean
+        # and matches PARA convention.
+        folder = (args.get("folder") or default_folder).strip("/")
         tags_raw = args.get("tags")
 
         try:
-            if folder:
-                dest_dir = _resolve_under_vault(vault, folder)
-                dest_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                dest_dir = vault
+            dest_dir = _resolve_under_vault(vault, folder) if folder else vault
+            dest_dir.mkdir(parents=True, exist_ok=True)
         except VaultError as e:
             return f"Error: {e}"
         dest = dest_dir / f"{title}.md"
@@ -188,7 +188,7 @@ def _make_handlers(vault: Path):
         target.unlink()
         return f"Deleted: {rel}"
 
-    return save, list_notes, search, read, delete
+    return save, list_notes, search, read, delete, default_folder
 
 
 def _read_safe(path: Path) -> str:
@@ -213,8 +213,14 @@ def _make_snippet(text: str, query: str, width: int = 80) -> str:
 # ---------------------------------------------------------------------------
 
 
-def make_obsidian_tools(vault: str | Path) -> list[Tool]:
+def make_obsidian_tools(
+    vault: str | Path, default_folder: str = "Inbox"
+) -> list[Tool]:
     """Build the five obsidian_* tools bound to a vault path.
+
+    `default_folder` is where new notes land when no folder is specified —
+    defaults to "Inbox" (PARA capture folder). Pass "" to revert to
+    saving at the vault root.
 
     Raises VaultError if the vault path doesn't exist.
     """
@@ -222,18 +228,22 @@ def make_obsidian_tools(vault: str | Path) -> list[Tool]:
     if not vault_path.is_dir():
         raise VaultError(f"vault '{vault}' is not a directory")
 
-    save, list_notes, search, read, delete = _make_handlers(vault_path)
+    save, list_notes, search, read, delete, default_folder = _make_handlers(
+        vault_path, default_folder
+    )
 
     return [
         Tool(
             definition=ToolDef(
                 name="obsidian_save",
                 description=(
-                    "Save markdown content to the Obsidian vault. Writes "
-                    "<vault>/<folder>/<title>.md with YAML frontmatter "
-                    "(title, created, tags, source). Use 'folder' to land "
-                    "the note in a subfolder; omit to save at the vault "
-                    "root."
+                    f"Save markdown content to the Obsidian vault. Writes "
+                    f"<vault>/<folder>/<title>.md with YAML frontmatter "
+                    f"(title, created, tags, source). Notes default to the "
+                    f"'{default_folder}' folder (PARA capture) — pass "
+                    f"'folder' to file directly into Projects, Areas, "
+                    f"Resources, Archive, or a subpath thereof when the "
+                    f"target is clear."
                 ),
                 input_schema={
                     "type": "object",

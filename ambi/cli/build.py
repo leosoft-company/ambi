@@ -120,8 +120,9 @@ def build_agent(
     vault = os.getenv("OBSIDIAN_VAULT")
     if vault:
         from ..integrations.obsidian import VaultError, make_obsidian_tools
+        default_folder = os.getenv("OBSIDIAN_DEFAULT_FOLDER", "Inbox")
         try:
-            for t in make_obsidian_tools(vault):
+            for t in make_obsidian_tools(vault, default_folder=default_folder):
                 tools.register(t)
         except VaultError as e:
             # Vault misconfigured — log to stderr but don't crash the agent.

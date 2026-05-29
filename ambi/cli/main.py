@@ -103,29 +103,51 @@ Examples:
 
 _EXAMPLE_SKILL_OBSIDIAN = """---
 name: obsidian
-description: Read, search, write, or delete notes in the user's Obsidian vault.
+description: Read, search, write, or delete notes in the user's Obsidian vault (PARA-organized).
 ---
 
 The Obsidian vault is the user's second brain — a directory tree of
-markdown files. Skill is only useful if `obsidian_*` tools are registered
-(controlled by the `OBSIDIAN_VAULT` environment variable).
+markdown files organised by **PARA**:
+
+- **Projects/** — active commitments with a deadline or clear outcome
+- **Areas/** — ongoing responsibilities (Work, Family, Health, Finances…)
+- **Resources/** — reference material, learning, things to revisit
+- **Archive/** — completed projects, retired areas, anything inactive
+- **Inbox/** — capture buffer; everything new lands here and gets sorted later
 
 Ground every claim about vault content in a tool call. Never invent note
 contents or paths.
 
-Typical flow:
-- **Find existing notes**: `obsidian_search({"query": "..."})` — full-text
-  search; falls back to `obsidian_list` for everything. Use vault-relative
-  paths returned from these for follow-up reads.
-- **Read**: `obsidian_read({"path": "Areas/Work/MOC.md"})` — full content.
-- **Save**: `obsidian_save({"title": "...", "content": "...", "folder": "Inbox", "tags": "ai,research"})`.
-  Pass the full markdown body — do not truncate or summarise into the
-  content field.
-- **Delete**: `obsidian_delete({"path": "Inbox/scratch.md"})` — destructive,
-  confirm with the user first if intent is ambiguous.
+## Default save → Inbox
 
-Folder conventions vary by user. Don't invent folders — list first, ask
-the user where to land a new note if you're unsure.
+When the user asks you to save, jot, note, or capture something, write to
+**Inbox** unless they explicitly name a different folder. Don't try to be
+clever about filing on first capture — the user will sort it themselves
+during their PARA review. Calling `obsidian_save` without a `folder` arg
+lands in Inbox automatically; the tool description confirms the default.
+
+## When to specify a different folder
+
+Only file directly into a PARA bucket when the user's intent is clear:
+- "Add this to my Postgres migration project" → `folder: "Projects/Postgres migration"`
+- "Save this under my Health area" → `folder: "Areas/Health"`
+- "Archive this old project note" → move to `Archive/<original-folder>`
+
+For anything else, prefer Inbox.
+
+## Typical flow
+
+- **Search first**: `obsidian_search({"query": "..."})` — full-text across
+  filenames and bodies. Falls back to `obsidian_list` for browsing a folder.
+- **Read**: `obsidian_read({"path": "Areas/Work/MOC.md"})` — full content,
+  including frontmatter.
+- **Save (capture)**: `obsidian_save({"title": "...", "content": "...", "tags": "..."})`
+  → lands in Inbox.
+- **Save (filed)**: same call with `"folder": "Areas/Health"` when intent is clear.
+- **Delete**: destructive — confirm with the user first if the intent is ambiguous.
+
+Always pass the full markdown body in `content` — don't truncate or
+summarise the user's input.
 """
 
 

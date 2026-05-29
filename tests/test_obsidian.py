@@ -76,17 +76,47 @@ def test_parse_frontmatter_malformed_yaml_returns_empty():
 # ---------- save ----------
 
 
-async def test_save_creates_file_with_frontmatter(tmp_path):
+async def test_save_defaults_to_inbox(tmp_path):
     save = _tools(tmp_path)["obsidian_save"]
     result = await save.handler({"title": "test", "content": "Hello world"})
     assert "Saved:" in result
-    p = tmp_path / "test.md"
-    assert p.exists()
+    p = tmp_path / "Inbox" / "test.md"
+    assert p.exists(), "default save should land in Inbox/"
     text = p.read_text()
     assert text.startswith("---\n")
     assert "title: test" in text
     assert "created:" in text
     assert "Hello world" in text
+
+
+async def test_save_custom_default_folder(tmp_path):
+    """default_folder parameter overrides Inbox."""
+    from ambi.integrations.obsidian import make_obsidian_tools
+
+    tools = {t.definition.name: t for t in make_obsidian_tools(tmp_path, default_folder="Capture")}
+    await tools["obsidian_save"].handler({"title": "x", "content": "body"})
+    assert (tmp_path / "Capture" / "x.md").exists()
+
+
+async def test_save_empty_default_folder_lands_at_root(tmp_path):
+    """default_folder='' restores old behaviour: save at vault root."""
+    from ambi.integrations.obsidian import make_obsidian_tools
+
+    tools = {t.definition.name: t for t in make_obsidian_tools(tmp_path, default_folder="")}
+    await tools["obsidian_save"].handler({"title": "x", "content": "body"})
+    assert (tmp_path / "x.md").exists()
+
+
+async def test_save_explicit_folder_overrides_default(tmp_path):
+    save = _tools(tmp_path)["obsidian_save"]
+    await save.handler({
+        "title": "filed",
+        "content": "body",
+        "folder": "Areas/Health",
+    })
+    assert (tmp_path / "Areas/Health/filed.md").exists()
+    # And nothing in Inbox.
+    assert not (tmp_path / "Inbox" / "filed.md").exists()
 
 
 async def test_save_in_subfolder_creates_it(tmp_path):
@@ -106,7 +136,7 @@ async def test_save_with_tags(tmp_path):
         "content": "x",
         "tags": "ai, research, ml",
     })
-    text = (tmp_path / "tagged.md").read_text()
+    text = (tmp_path / "Inbox" / "tagged.md").read_text()
     assert "tags:" in text
     assert "- ai" in text
     assert "- research" in text
@@ -151,12 +181,13 @@ async def test_list_finds_notes_recursively(tmp_path):
 
 async def test_list_filters_by_folder(tmp_path):
     save = _tools(tmp_path)["obsidian_save"]
-    await save.handler({"title": "root_note", "content": "x"})
-    await save.handler({"title": "inbox_note", "content": "x", "folder": "Inbox"})
+    # Inbox is the default, so this lands there.
+    await save.handler({"title": "inbox_note", "content": "x"})
+    await save.handler({"title": "area_note", "content": "x", "folder": "Areas"})
     list_t = _tools(tmp_path)["obsidian_list"]
-    result = await list_t.handler({"folder": "Inbox"})
-    assert "inbox_note.md" in result
-    assert "root_note.md" not in result
+    result = await list_t.handler({"folder": "Areas"})
+    assert "area_note.md" in result
+    assert "inbox_note.md" not in result
 
 
 # ---------- search ----------
@@ -194,7 +225,7 @@ async def test_read_returns_full_content(tmp_path):
     save = _tools(tmp_path)["obsidian_save"]
     await save.handler({"title": "readme", "content": "the body"})
     read = _tools(tmp_path)["obsidian_read"]
-    result = await read.handler({"path": "readme.md"})
+    result = await read.handler({"path": "Inbox/readme.md"})
     assert "the body" in result
     assert "title: readme" in result  # frontmatter included
 
@@ -217,11 +248,11 @@ async def test_read_rejects_traversal(tmp_path):
 async def test_delete_removes_file(tmp_path):
     save = _tools(tmp_path)["obsidian_save"]
     await save.handler({"title": "doomed", "content": "x"})
-    assert (tmp_path / "doomed.md").exists()
+    assert (tmp_path / "Inbox" / "doomed.md").exists()
     delete = _tools(tmp_path)["obsidian_delete"]
-    result = await delete.handler({"path": "doomed.md"})
+    result = await delete.handler({"path": "Inbox/doomed.md"})
     assert "Deleted" in result
-    assert not (tmp_path / "doomed.md").exists()
+    assert not (tmp_path / "Inbox" / "doomed.md").exists()
 
 
 async def test_delete_missing_is_noop(tmp_path):
