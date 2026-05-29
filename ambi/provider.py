@@ -1,6 +1,6 @@
 from typing import AsyncIterator, Protocol
 
-from .types import Block, CompletionResult, Message, ToolDef
+from .types import CompletionResult, Message, ProviderChunk, ToolDef
 
 
 class LLMProvider(Protocol):
@@ -13,11 +13,13 @@ class LLMProvider(Protocol):
         **provider_kwargs,
     ) -> CompletionResult: ...
 
-    async def stream(
+    def stream(
         self,
         messages: list[Message],
         tools: list[ToolDef],
         system: str | None = None,
         max_tokens: int = 4096,
         **provider_kwargs,
-    ) -> AsyncIterator[Block]: ...
+    ) -> AsyncIterator[ProviderChunk]:
+        """Yield TextChunk / ToolCallChunk events, ending with StreamEnd."""
+        ...

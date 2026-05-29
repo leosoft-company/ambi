@@ -1,11 +1,28 @@
 import asyncio
 
+from typing import AsyncIterator
+
 from .provider import LLMProvider
 from .sensegate import SenseGate, ToolInvocation, correction_message
 from .skills import SkillRegistry, assemble_system, make_load_skill_tool
 from .store import SqliteStore
 from .tool import ToolRegistry
-from .types import Block, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from .types import (
+    AgentEvent,
+    Block,
+    ChatComplete,
+    Message,
+    SenseGateFlagEvent,
+    StreamEnd,
+    TextBlock,
+    TextChunk,
+    TextDelta,
+    ToolCallChunk,
+    ToolResultBlock,
+    ToolResultEvent,
+    ToolUseBlock,
+    ToolUseEvent,
+)
 
 
 class MaxTurnsExceeded(RuntimeError):
@@ -118,6 +135,112 @@ class Agent:
                         ToolInvocation(
                             call=call, result=res, kind=self.tools.kind(call.name)
                         )
+                    )
+                self.messages.append(Message("user", list(results)))
+        except BaseException:
+            del self.messages[snapshot:]
+            raise
+
+        del self.messages[snapshot:]
+        raise MaxTurnsExceeded(max_turns)
+
+    async def chat_stream(
+        self, user_input: str, max_turns: int = 20
+    ) -> AsyncIterator[AgentEvent]:
+        """Like chat() but yields events as they happen.
+
+        Yields:
+            TextDelta — incremental text from the assistant
+            ToolUseEvent — model decided to call a tool
+            ToolResultEvent — tool finished executing
+            SenseGateFlagEvent — SenseGate flagged a mismatch (retry coming if write)
+            ChatComplete — final reply text (always the last event on success)
+
+        Same locking + persistence + rollback guarantees as chat().
+        """
+        async with self._chat_lock:
+            async for ev in self._chat_stream_locked(user_input, max_turns):
+                yield ev
+
+    async def _chat_stream_locked(
+        self, user_input: str, max_turns: int
+    ) -> AsyncIterator[AgentEvent]:
+        snapshot = len(self.messages)
+        self.messages.append(Message("user", [TextBlock(user_input)]))
+
+        invocations: list[ToolInvocation] = []
+        retries_left = self.sensegate.max_retries if self.sensegate else 0
+
+        try:
+            for _ in range(max_turns):
+                # Stream one provider turn — accumulate text + tool calls.
+                text_buf = ""
+                tool_calls: list[ToolCallChunk] = []
+                stop_reason = "end_turn"
+                async for chunk in self.provider.stream(
+                    self._context_view(),
+                    self.tools.defs(),
+                    system=self.system,
+                ):
+                    if isinstance(chunk, TextChunk):
+                        text_buf += chunk.text
+                        yield TextDelta(text=chunk.text)
+                    elif isinstance(chunk, ToolCallChunk):
+                        tool_calls.append(chunk)
+                        yield ToolUseEvent(
+                            id=chunk.id, name=chunk.name, input=chunk.input,
+                        )
+                    elif isinstance(chunk, StreamEnd):
+                        stop_reason = chunk.stop_reason
+
+                # Materialize the assistant Message.
+                content: list[Block] = []
+                if text_buf:
+                    content.append(TextBlock(text=text_buf))
+                for tc in tool_calls:
+                    content.append(
+                        ToolUseBlock(id=tc.id, name=tc.name, input=tc.input)
+                    )
+                self.messages.append(Message("assistant", content))
+
+                if stop_reason != "tool_use":
+                    final_text = text_buf
+
+                    if self.sensegate is not None:
+                        verdict = await self.sensegate.check(final_text, invocations)
+                        if not verdict.matches:
+                            has_write = any(
+                                inv.kind == "write" for inv in invocations
+                            )
+                            yield SenseGateFlagEvent(reason=verdict.reason)
+                            if has_write and retries_left > 0:
+                                self.messages.append(
+                                    correction_message(verdict.reason)
+                                )
+                                retries_left -= 1
+                                continue
+
+                    await self._persist_new()
+                    yield ChatComplete(final_text=final_text)
+                    return
+
+                # Tool calls — invoke them in parallel.
+                use_blocks = [b for b in content if isinstance(b, ToolUseBlock)]
+                results = await asyncio.gather(
+                    *(self._invoke_with_timeout(c) for c in use_blocks)
+                )
+                for call, res in zip(use_blocks, results):
+                    res.tool_use_id = call.id
+                    invocations.append(
+                        ToolInvocation(
+                            call=call, result=res, kind=self.tools.kind(call.name)
+                        )
+                    )
+                    yield ToolResultEvent(
+                        id=call.id,
+                        name=call.name,
+                        content=res.content,
+                        is_error=res.is_error,
                     )
                 self.messages.append(Message("user", list(results)))
         except BaseException:

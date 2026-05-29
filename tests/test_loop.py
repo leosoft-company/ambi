@@ -8,15 +8,22 @@ from ambi.skills import SkillRegistry
 from ambi.store import SqliteStore
 from ambi.tool import Tool, ToolKind, ToolRegistry
 from ambi.types import (
+    ChatComplete,
     CompletionResult,
     Message,
+    StreamEnd,
     TextBlock,
+    TextChunk,
+    TextDelta,
+    ToolCallChunk,
     ToolDef,
     ToolResultBlock,
+    ToolResultEvent,
     ToolUseBlock,
+    ToolUseEvent,
 )
 
-from tests.mock_provider import MockProvider
+from tests.mock_provider import MockProvider, MockStreamProvider
 
 
 def _tool(name: str, handler, kind: ToolKind = "read") -> Tool:
@@ -701,3 +708,74 @@ async def test_sensegate_disabled_when_omitted():
     text = await agent.chat("send it")
     assert text == "done!"
     assert len(provider.calls) == 2
+
+
+# ---------- streaming ----------
+
+
+async def test_chat_stream_emits_text_deltas_and_completes():
+    provider = MockStreamProvider([
+        [
+            TextChunk(text="hello "),
+            TextChunk(text="there"),
+            StreamEnd(stop_reason="end_turn"),
+        ],
+    ])
+    agent = Agent(provider=provider, tools=ToolRegistry(), system="s")
+    events = [ev async for ev in agent.chat_stream("hi")]
+    deltas = [e.text for e in events if isinstance(e, TextDelta)]
+    assert deltas == ["hello ", "there"]
+    complete = [e for e in events if isinstance(e, ChatComplete)]
+    assert complete and complete[0].final_text == "hello there"
+
+
+async def test_chat_stream_yields_tool_use_and_result_events():
+    tools = ToolRegistry()
+
+    async def add(args):
+        return str(args["a"] + args["b"])
+
+    tools.register(_tool("add", add))
+
+    provider = MockStreamProvider([
+        # Turn 1: tool use chunk + stream end
+        [
+            ToolCallChunk(id="t1", name="add", input={"a": 1, "b": 2}),
+            StreamEnd(stop_reason="tool_use"),
+        ],
+        # Turn 2: final text
+        [
+            TextChunk(text="3"),
+            StreamEnd(stop_reason="end_turn"),
+        ],
+    ])
+    agent = Agent(provider=provider, tools=tools, system="s")
+    events = [ev async for ev in agent.chat_stream("add 1+2")]
+    tool_uses = [e for e in events if isinstance(e, ToolUseEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    completes = [e for e in events if isinstance(e, ChatComplete)]
+    assert tool_uses and tool_uses[0].name == "add"
+    assert tool_results and tool_results[0].content == "3"
+    assert completes and completes[0].final_text == "3"
+
+
+async def test_chat_stream_persists_on_success(tmp_path):
+    from ambi.store import SqliteStore
+
+    db = tmp_path / "session.db"
+    provider = MockStreamProvider([
+        [TextChunk(text="ok"), StreamEnd(stop_reason="end_turn")],
+    ])
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        store=SqliteStore(db),
+    )
+    await agent.load()
+    _ = [ev async for ev in agent.chat_stream("first")]
+
+    fresh = Agent(
+        provider=MockStreamProvider([]), tools=ToolRegistry(), system="s",
+        store=SqliteStore(db),
+    )
+    await fresh.load()
+    assert len(fresh.messages) == 2

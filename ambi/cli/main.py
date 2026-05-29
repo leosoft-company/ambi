@@ -179,9 +179,20 @@ async def _run_chat() -> int:
     from rich.table import Table
     from rich.text import Text
 
+    from rich.live import Live
+
     from ..env import load_env
     from ..integrations.hippocamp import hippocamp_server, load_hippocamp_tools
-    from ..types import TextBlock, ToolResultBlock, ToolUseBlock
+    from ..types import (
+        ChatComplete,
+        SenseGateFlagEvent,
+        TextBlock,
+        TextDelta,
+        ToolResultBlock,
+        ToolResultEvent,
+        ToolUseBlock,
+        ToolUseEvent,
+    )
     from .build import build_agent
 
     from ..scheduler import TaskStore
@@ -270,8 +281,7 @@ async def _run_chat() -> int:
 
             snapshot = len(agent.messages)
             try:
-                with console.status("[dim]thinking…[/dim]", spinner="dots"):
-                    reply = await agent.chat(user_input)
+                await _stream_turn(console, agent, user_input)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 del agent.messages[snapshot:]
                 console.print("[dim italic](cancelled)[/dim italic]")
@@ -280,20 +290,65 @@ async def _run_chat() -> int:
                 del agent.messages[snapshot:]
                 console.print(f"[red]error: {type(e).__name__}: {e}[/red]")
                 continue
-
-            _render_tool_trace(console, agent.messages[snapshot:])
-            console.print(
-                Panel(
-                    Markdown(reply),
-                    title="[bold magenta]ambi[/bold magenta]",
-                    title_align="left",
-                    border_style="magenta",
-                    padding=(0, 1),
-                )
-            )
             console.print()
     finally:
         await _close_hippo()
+
+
+async def _stream_turn(console, agent, user_input: str) -> None:
+    """Drive agent.chat_stream() through a rich Live panel."""
+    from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    from ..types import (
+        ChatComplete,
+        SenseGateFlagEvent,
+        TextDelta,
+        ToolResultEvent,
+        ToolUseEvent,
+    )
+
+    buffer = ""
+    panel_title = "[bold magenta]ambi[/bold magenta]"
+
+    def panel() -> Panel:
+        body = Markdown(buffer) if buffer else Spinner("dots", text="thinking…")
+        return Panel(
+            body,
+            title=panel_title,
+            title_align="left",
+            border_style="magenta",
+            padding=(0, 1),
+        )
+
+    with Live(panel(), console=console, refresh_per_second=12, transient=False) as live:
+        async for ev in agent.chat_stream(user_input):
+            if isinstance(ev, TextDelta):
+                buffer += ev.text
+                live.update(panel())
+            elif isinstance(ev, ToolUseEvent):
+                # Tool calls between text chunks — note them inside the panel as
+                # dim cyan lines so the user sees activity without losing the
+                # accumulated text.
+                buffer += f"\n\n_↳ {ev.name}({_short_args(ev.input, 60)})_\n"
+                live.update(panel())
+            elif isinstance(ev, ToolResultEvent):
+                if ev.is_error:
+                    buffer += f"_  ✗ {ev.name} error_\n"
+                    live.update(panel())
+            elif isinstance(ev, SenseGateFlagEvent):
+                buffer += (
+                    f"\n_⚠ SenseGate flagged the prior reply — "
+                    f"{ev.reason[:120]}. Restating._\n\n"
+                )
+                live.update(panel())
+            elif isinstance(ev, ChatComplete):
+                # Stream finished — the buffer already holds the final visible
+                # text. Live will exit with the current panel snapshot.
+                pass
 
 
 def _render_tool_trace(console, new_messages) -> None:

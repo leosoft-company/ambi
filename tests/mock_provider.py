@@ -42,3 +42,38 @@ class MockProvider:
 
     async def stream(self, *args: Any, **kwargs: Any):
         raise NotImplementedError("MockProvider does not implement streaming")
+
+
+class MockStreamProvider:
+    """Streams scripted chunks. `scripts` is a list of lists of chunks —
+    one inner list per provider turn.
+    """
+
+    def __init__(self, scripts: list[list]):
+        self.scripts = list(scripts)
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete(self, *args: Any, **kwargs: Any):
+        raise NotImplementedError("MockStreamProvider only implements stream()")
+
+    async def stream(
+        self,
+        messages,
+        tools,
+        system: str | None = None,
+        max_tokens: int = 4096,
+        **provider_kwargs: Any,
+    ):
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "tools": tools,
+                "system": system,
+                "max_tokens": max_tokens,
+                "kwargs": provider_kwargs,
+            }
+        )
+        if not self.scripts:
+            raise RuntimeError("MockStreamProvider out of scripts")
+        for chunk in self.scripts.pop(0):
+            yield chunk
