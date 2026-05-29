@@ -159,17 +159,20 @@ class LLMClaimVerifier:
     async def verify(
         self, final_text: str, invocations: list[ToolInvocation]
     ) -> Verdict:
+        from .usage import purpose
+
         prompt = _JUDGE_PROMPT.format(
             tool_log=self._format_invocations(invocations),
             final_text=final_text,
         )
-        result = await self.provider.complete(
-            messages=[Message("user", [TextBlock(prompt)])],
-            tools=[],
-            system="You are a strict integrity checker. Respond with JSON only.",
-            max_tokens=self.max_tokens,
-            **self.provider_kwargs,
-        )
+        with purpose("sensegate"):
+            result = await self.provider.complete(
+                messages=[Message("user", [TextBlock(prompt)])],
+                tools=[],
+                system="You are a strict integrity checker. Respond with JSON only.",
+                max_tokens=self.max_tokens,
+                **self.provider_kwargs,
+            )
         text = "".join(
             b.text for b in result.content if isinstance(b, TextBlock)
         ).strip()

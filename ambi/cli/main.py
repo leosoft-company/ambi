@@ -207,6 +207,8 @@ async def _run_chat() -> int:
     banner.append("history", style="dim bold")
     banner.append(" · ", style="dim")
     banner.append("audit", style="dim bold")
+    banner.append(" · ", style="dim")
+    banner.append("usage", style="dim bold")
     console.print(Panel(banner, border_style="cyan", padding=(0, 1)))
     console.print()
 
@@ -230,6 +232,9 @@ async def _run_chat() -> int:
                 continue
             if user_input.lower() == "audit":
                 _render_audit(console, agent)
+                continue
+            if user_input.lower() == "usage":
+                await _render_usage_inline(console)
                 continue
 
             snapshot = len(agent.messages)
@@ -520,6 +525,116 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    """Show token/cost summary: today, this week, all-time."""
+    return asyncio.run(_run_usage(args))
+
+
+async def _run_usage(args: argparse.Namespace) -> int:
+    from datetime import datetime, timedelta, timezone
+
+    from rich.console import Console
+
+    from ..usage import UsageStore
+
+    store = UsageStore(paths.usage_db())
+    console = Console()
+    now = datetime.now(timezone.utc)
+
+    windows = [
+        ("Today", now.replace(hour=0, minute=0, second=0, microsecond=0)),
+        ("Last 7 days", now - timedelta(days=7)),
+        ("All time", None),
+    ]
+    for label, since in windows:
+        summary = await store.summary(since=since)
+        _render_usage_summary(console, label, summary)
+        console.print()
+    return 0
+
+
+def _render_usage_summary(console, title: str, summary) -> None:
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    if summary.calls == 0:
+        console.print(
+            Panel(
+                Text(f"(no LLM calls recorded for: {title.lower()})", style="dim"),
+                title=f"[bold cyan]{title}[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+        return
+
+    header = Text()
+    header.append(f"{summary.calls} call", style="bold")
+    header.append(f"{'s' if summary.calls != 1 else ''} · ", style="bold")
+    header.append(
+        f"{summary.input_tokens:,} in / {summary.output_tokens:,} out tokens · ",
+        style="dim",
+    )
+    header.append(f"${summary.cost_usd:.4f}", style="bold yellow")
+
+    by_purpose = Table(
+        title="by purpose", header_style="dim cyan",
+        title_style="dim", show_lines=False, expand=False,
+    )
+    by_purpose.add_column("purpose", style="cyan")
+    by_purpose.add_column("calls", justify="right")
+    by_purpose.add_column("input", justify="right")
+    by_purpose.add_column("output", justify="right")
+    by_purpose.add_column("cost", justify="right")
+    for name, row in sorted(summary.by_purpose.items()):
+        by_purpose.add_row(
+            name, str(row.calls),
+            f"{row.input_tokens:,}", f"{row.output_tokens:,}",
+            f"${row.cost_usd:.4f}",
+        )
+
+    by_model = Table(
+        title="by model", header_style="dim cyan",
+        title_style="dim", show_lines=False, expand=False,
+    )
+    by_model.add_column("model", style="cyan")
+    by_model.add_column("calls", justify="right")
+    by_model.add_column("input", justify="right")
+    by_model.add_column("output", justify="right")
+    by_model.add_column("cost", justify="right")
+    for name, row in sorted(summary.by_model.items()):
+        by_model.add_row(
+            name, str(row.calls),
+            f"{row.input_tokens:,}", f"{row.output_tokens:,}",
+            f"${row.cost_usd:.4f}",
+        )
+
+    from rich.console import Group
+    console.print(Panel(
+        Group(header, by_purpose, by_model),
+        title=f"[bold cyan]{title}[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 1),
+    ))
+
+
+async def _render_usage_inline(console) -> None:
+    """REPL `usage` command — quick session+today snapshot."""
+    from datetime import datetime, timezone
+
+    from ..usage import UsageStore
+
+    store = UsageStore(paths.usage_db())
+    today_since = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    today = await store.summary(since=today_since)
+    all_time = await store.summary()
+    _render_usage_summary(console, "Today", today)
+    _render_usage_summary(console, "All time", all_time)
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"ambi {_get_version()}")
     return 0
@@ -547,6 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create ~/.ambi/ with .env and example skills").set_defaults(func=cmd_init)
     sub.add_parser("run", help="start the Telegram bot + scheduler daemon").set_defaults(func=cmd_run)
     sub.add_parser("chat", help="local REPL against the same session").set_defaults(func=cmd_chat)
+    sub.add_parser("usage", help="show token + cost summary").set_defaults(func=cmd_usage)
     sub.add_parser("version", help="print version").set_defaults(func=cmd_version)
     return p
 

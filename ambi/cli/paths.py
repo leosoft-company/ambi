@@ -51,6 +51,10 @@ def tasks_db() -> Path:
     return data_dir() / "tasks.db"
 
 
+def usage_db() -> Path:
+    return data_dir() / "usage.db"
+
+
 def hippocamp_log() -> Path:
     return data_dir() / "hippocamp.log"
 

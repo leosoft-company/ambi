@@ -133,7 +133,12 @@ def build_agent(
         paths.skills_dir(),
     )
 
-    provider = GoogleProvider(model=os.getenv("AMBI_MODEL", DEFAULT_MODEL))
+    raw_provider = GoogleProvider(model=os.getenv("AMBI_MODEL", DEFAULT_MODEL))
+    # Track tokens + cost across chat, sensegate, and compaction calls.
+    from ..usage import TrackingProvider, UsageStore
+    usage_store = UsageStore(paths.usage_db())
+    provider = TrackingProvider(inner=raw_provider, store=usage_store)
+
     verify_reads = os.getenv("AMBI_VERIFY_READS", "0") == "1"
     gate = SenseGate(
         verifier=LLMClaimVerifier(

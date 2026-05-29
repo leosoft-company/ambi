@@ -414,17 +414,20 @@ class Agent:
                     pass  # in-memory anchor still works for this process
 
     async def _summarize_segment(self, segment: list[Message]) -> str:
+        from .usage import purpose
+
         prompt = _build_compaction_prompt(segment)
-        result = await self.provider.complete(
-            messages=[Message("user", [TextBlock(prompt)])],
-            tools=[],
-            system=(
-                "You compress conversation segments for long-term agent "
-                "recall. Be terse, factual, third-person. One short "
-                "paragraph; no headers, no bullet lists."
-            ),
-            max_tokens=512,
-        )
+        with purpose("compaction"):
+            result = await self.provider.complete(
+                messages=[Message("user", [TextBlock(prompt)])],
+                tools=[],
+                system=(
+                    "You compress conversation segments for long-term agent "
+                    "recall. Be terse, factual, third-person. One short "
+                    "paragraph; no headers, no bullet lists."
+                ),
+                max_tokens=512,
+            )
         return _final_text(result.content).strip()
 
     async def _invoke_with_timeout(self, call: ToolUseBlock) -> ToolResultBlock:

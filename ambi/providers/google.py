@@ -65,7 +65,9 @@ class GoogleProvider:
         resp = await self.client.aio.models.generate_content(
             model=self.model, contents=contents, config=config,
         )
-        return _from_gemini_response(resp)
+        result = _from_gemini_response(resp)
+        result.usage["model"] = self.model
+        return result
 
     async def stream(
         self,
@@ -139,6 +141,7 @@ class GoogleProvider:
                 usage = {
                     "input_tokens": getattr(um, "prompt_token_count", 0),
                     "output_tokens": getattr(um, "candidates_token_count", 0),
+                    "model": self.model,
                 }
 
         if had_tool_call:
