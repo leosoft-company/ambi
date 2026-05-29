@@ -42,14 +42,24 @@ ambi run                             # daemon: Telegram bot + scheduler, always-
 
 Once `ambi run` is up, the Telegram bot becomes your remote — DM it from your phone, ask for reminders, query memory, run commands. The daemon keeps the SQLite session and scheduled tasks alive across restarts.
 
-### From source
+### From source (global install)
 
 ```bash
 git clone https://github.com/leosoft-company/ambi.git
 cd ambi
+uv tool install --editable . --with hippocamp   # puts `ambi` on PATH globally
+ambi init
+```
+
+Edits to the source land in the installed binary immediately — no reinstall needed.
+
+### From source (project-local only)
+
+```bash
+cd ambi
 uv sync --extra dev --extra hippocamp
 cp .env.example .env
-uv run python examples/repl.py        # or examples/telegram_bot.py
+uv run python examples/repl.py                  # or examples/telegram_bot.py
 ```
 
 The `examples/` scripts show the raw library API; the installed `ambi` CLI is the opinionated path.
