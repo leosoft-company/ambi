@@ -1,0 +1,19 @@
+.env
+.venv/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Project-local agent config
+.claude/
+
+# Editor noise
+.DS_Store
+.idea/
+.vscode/

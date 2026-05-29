@@ -1,0 +1,55 @@
+[project]
+name = "ambi-core"
+version = "0.1.0"
+description = "A provider-agnostic personal-agent harness — agent loop, first-class skills, action verification (SenseGate), MCP tool integration, scheduling, and Telegram transport."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Prageeth Charith", email = "prageeth.cs@gmail.com" }]
+maintainers = [{ name = "Leosoft" }]
+keywords = ["llm", "agent", "harness", "mcp", "skills", "telegram", "scheduling", "personal-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "google-genai>=0.3",
+    "pyyaml>=6",
+    "python-dotenv>=1",
+    "aiosqlite>=0.20",
+    "mcp>=1.0",
+    "python-telegram-bot>=21",
+    "croniter>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+hippocamp = ["hippocamp>=0.11"]
+
+[project.urls]
+Homepage = "https://github.com/leosoft-company/ambi"
+Repository = "https://github.com/leosoft-company/ambi"
+Issues = "https://github.com/leosoft-company/ambi/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ambi"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "smoke: live API smoke tests (cost tokens, require GEMINI_API_KEY)",
+]
