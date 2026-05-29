@@ -29,40 +29,128 @@ memory that follows you across hosts.
 | Run-command      | Allowlisted external commands via `make_run_command_tool(CommandPolicy)`. Argv-only (no shell), cwd jail, timeout, output cap. |
 | Transports       | `TelegramTransport` — polling, allowlist auth, typing indicator, message splitting, reply-context extraction, `/scheduled` command. |
 
-## Quick start
+## Setup (fresh machine)
+
+### 1. Prerequisites
+
+- **Python 3.12 or 3.13**
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** — recommended for the global CLI install. Plain `pip` also works.
+
+If you don't have uv:
 
 ```bash
-pip install "ambi-core[hippocamp]"   # drop [hippocamp] if you don't want long-term memory
-ambi init                            # creates ~/.ambi/ with .env template + example skills
-# edit ~/.ambi/.env — add GEMINI_API_KEY, optionally TELEGRAM_BOT_TOKEN + your user ID
-
-ambi chat                            # local REPL
-ambi run                             # daemon: Telegram bot + scheduler, always-on
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# or: brew install uv
 ```
 
-Once `ambi run` is up, the Telegram bot becomes your remote — DM it from your phone, ask for reminders, query memory, run commands. The daemon keeps the SQLite session and scheduled tasks alive across restarts.
+### 2. Install the `ambi` CLI
 
-### From source (global install)
+```bash
+uv tool install "ambi-core[hippocamp]"
+```
+
+This puts `ambi` on your PATH globally. Drop `[hippocamp]` if you don't want long-term memory.
+
+> Until v0.1.0 is on PyPI, install from source instead:
+> ```bash
+> git clone https://github.com/leosoft-company/ambi.git
+> uv tool install --editable ./ambi --with hippocamp
+> ```
+
+### 3. Get a Gemini API key
+
+Go to <https://aistudio.google.com/apikey>, sign in with a Google account, **Create API key**. Free tier is enough to play with — Gemini 2.5 Flash is what ambi uses by default.
+
+### 4. Initialize
+
+```bash
+ambi init
+```
+
+This creates `~/.ambi/` with:
+
+```
+~/.ambi/
+  .env          # secrets and config (gitignore this if you copy it anywhere)
+  skills/       # example skills (time.md, shell.md) you can edit or delete
+  data/         # SQLite session DB lives here once you start chatting
+```
+
+Edit `~/.ambi/.env` and paste in your Gemini key:
+
+```
+GEMINI_API_KEY=AIza...
+```
+
+### 5. Try the local REPL
+
+```bash
+ambi chat
+```
+
+Bordered panels, spinner, paste-friendly prompt, persistent session — say hi and ask it to run `ls` or recall the time.
+
+### 6. (Optional) Telegram bot so you can talk from your phone
+
+This is what makes `ambi` feel like a personal assistant — once `ambi run` is up on your machine, DM the bot from anywhere.
+
+**a. Create the bot.** Open Telegram, search for **@BotFather**, send `/newbot`, follow the prompts. You'll get a token like `1234567890:ABCdef...`.
+
+**b. Find your numeric Telegram user ID.** DM **@userinfobot** — it replies with your ID (e.g. `123456789`). This is what restricts the bot to *you*.
+
+**c. Add both to `~/.ambi/.env`:**
+
+```
+TELEGRAM_BOT_TOKEN=1234567890:ABCdef...
+TELEGRAM_ALLOWED_USER_IDS=123456789
+```
+
+> **Skip the user ID at your peril.** Empty `TELEGRAM_ALLOWED_USER_IDS` means *anyone* who finds your bot can drive your agent (run commands, write to your memory).
+
+**d. Start the daemon:**
+
+```bash
+ambi run
+```
+
+DM your bot. It'll reply through ambi, persisting everything to `~/.ambi/data/session.db`. Ask it to remind you of something in 10 minutes; the scheduler fires it as a DM. Send `/scheduled` to see pending tasks.
+
+### 7. (Optional) Hippocamp memory
+
+If you installed with `[hippocamp]`, the binary is already on PATH. Just flip the switch in `~/.ambi/.env`:
+
+```
+AMBI_USE_HIPPOCAMP=1
+```
+
+Restart `ambi run` / `ambi chat`. The agent now has `recall_memory` / `update_memory` tools and a session prompt nudging it to use them. See [Hippocamp](https://github.com/leosoft-company/hippocamp) for what the memory store actually does.
+
+---
+
+### Daily commands
+
+```bash
+ambi chat       # local REPL (any directory)
+ambi run        # daemon (Telegram + scheduler)
+ambi init       # idempotent — safe to re-run after upgrades
+ambi version    # print version
+```
+
+State (session, tasks, hippocamp log) lives in `~/.ambi/data/`. Override with `AMBI_HOME=/elsewhere/.ambi` if you want multiple isolated profiles.
+
+### From source
 
 ```bash
 git clone https://github.com/leosoft-company/ambi.git
 cd ambi
-uv tool install --editable . --with hippocamp   # puts `ambi` on PATH globally
-ambi init
-```
-
-Edits to the source land in the installed binary immediately — no reinstall needed.
-
-### From source (project-local only)
-
-```bash
-cd ambi
+uv tool install --editable . --with hippocamp   # global install, edits land immediately
+# or, for project-local development:
 uv sync --extra dev --extra hippocamp
-cp .env.example .env
-uv run python examples/repl.py                  # or examples/telegram_bot.py
+uv run python examples/repl.py
+uv run pytest -m "not smoke"
 ```
 
-The `examples/` scripts show the raw library API; the installed `ambi` CLI is the opinionated path.
+`examples/repl.py` and `examples/telegram_bot.py` show the raw library API; the installed `ambi` CLI is the opinionated path.
 
 ### Minimal in-code use
 
