@@ -1,0 +1,13 @@
+name: self_intro_no_marketing_copy
+description: |
+  When asked who they are, the agent should answer with personality, not
+  the generic "I am Ambi, a personal AI assistant. My capabilities
+  include..." that the model defaults to without identity guidance.
+input: "Who are you?"
+assert:
+  # Voice constraints — these would catch a personality regression.
+  - text_not_matches: '(?i)i am ambi.{0,30}personal ai assistant'
+  - text_not_matches: '(?i)my capabilities include'
+  - text_not_matches: '(?i)happy to help'
+  # Identity should still mention "ambi" (case-insensitive).
+  - text_matches: '(?i)ambi'

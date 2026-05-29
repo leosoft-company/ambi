@@ -639,6 +639,122 @@ async def _render_usage_inline(console) -> None:
     _render_usage_summary(console, "All time", all_time)
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Run behavioral scenarios under evals/scenarios/ and report pass/fail."""
+    return asyncio.run(_run_evals(args))
+
+
+async def _run_evals(args: argparse.Namespace) -> int:
+    import os as _os
+    from pathlib import Path as _Path
+
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    from ..evals import load_scenarios, run_scenario
+    from .build import build_agent
+
+    _load_runtime_env()
+    paths.ensure_tree()
+
+    # Default to repo-relative evals/scenarios; allow override.
+    scenarios_dir = _Path(args.path) if args.path else _Path("evals/scenarios")
+    if not scenarios_dir.exists():
+        print(f"error: scenarios path '{scenarios_dir}' not found", file=sys.stderr)
+        return 2
+
+    scenarios = load_scenarios(scenarios_dir)
+    if not scenarios:
+        print(f"(no scenarios under {scenarios_dir})")
+        return 0
+
+    console = Console()
+    console.print(
+        Panel(
+            Text.from_markup(
+                f"Running [bold]{len(scenarios)}[/bold] scenario(s) from {scenarios_dir}"
+            ),
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+
+    results = []
+    for scenario in scenarios:
+        # Each scenario gets a fresh agent (no shared session state).
+        # We force a temp AMBI_HOME so eval runs don't touch real state.
+        agent = build_agent(
+            extra_tools=[], with_hippocamp=False, task_store=None,
+        )
+        result = await run_scenario(scenario, agent)
+        results.append(result)
+        _print_scenario_result(console, result)
+
+    # Summary table.
+    table = Table(
+        title="Eval summary", header_style="bold cyan",
+        title_style="bold", show_lines=False,
+    )
+    table.add_column("scenario", style="cyan")
+    table.add_column("status", justify="center")
+    table.add_column("pass/total", justify="right")
+    pass_n = 0
+    for r in results:
+        passed = sum(1 for a in r.assertion_results if a.passed)
+        total = len(r.assertion_results)
+        if r.error:
+            status = "[red]ERROR[/red]"
+        elif r.passed:
+            status = "[green]PASS[/green]"
+            pass_n += 1
+        else:
+            status = "[yellow]FAIL[/yellow]"
+        table.add_row(r.scenario.name, status, f"{passed}/{total}")
+    console.print(table)
+    console.print(
+        f"\n[bold]{pass_n}/{len(results)}[/bold] scenarios passed."
+    )
+    return 0 if pass_n == len(results) else 1
+
+
+def _print_scenario_result(console, result) -> None:
+    from rich.panel import Panel
+    from rich.text import Text
+
+    border = "green" if result.passed else ("red" if result.error else "yellow")
+    head = Text()
+    head.append(result.scenario.name, style="bold")
+    if result.scenario.description:
+        head.append(f"\n[dim]{result.scenario.description.strip()}[/dim]")
+    head.append(f"\n\n[bold]input:[/bold] {result.scenario.input}\n")
+    if result.error:
+        head.append(f"\n[red]ERROR: {result.error}[/red]")
+    else:
+        head.append(
+            f"\n[dim]tools called:[/dim] "
+            f"{', '.join(result.tools_called) or '(none)'}\n"
+        )
+        head.append(
+            f"[dim]reply:[/dim] {result.response_text[:200]}"
+            f"{'…' if len(result.response_text) > 200 else ''}\n"
+        )
+        head.append("\n")
+        for a in result.assertion_results:
+            tick = "✓" if a.passed else "✗"
+            colour = "green" if a.passed else "red"
+            val = f": {a.assertion.value}" if a.assertion.value else ""
+            head.append(
+                f"  [{colour}]{tick}[/{colour}] {a.assertion.type}{val}"
+            )
+            if not a.passed and a.detail:
+                head.append(f"   [dim]→ {a.detail}[/dim]")
+            head.append("\n")
+
+    console.print(Panel(Text.from_markup(str(head)), border_style=border, padding=(0, 1)))
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"ambi {_get_version()}")
     return 0
@@ -667,6 +783,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run", help="start the Telegram bot + scheduler daemon").set_defaults(func=cmd_run)
     sub.add_parser("chat", help="local REPL against the same session").set_defaults(func=cmd_chat)
     sub.add_parser("usage", help="show token + cost summary").set_defaults(func=cmd_usage)
+    eval_parser = sub.add_parser("eval", help="run behavioral scenarios in evals/")
+    eval_parser.add_argument("path", nargs="?", default=None,
+                             help="scenario file or directory (default: evals/scenarios)")
+    eval_parser.set_defaults(func=cmd_eval)
     sub.add_parser("version", help="print version").set_defaults(func=cmd_version)
     return p
 

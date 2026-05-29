@@ -1,0 +1,14 @@
+name: general_knowledge_no_tools
+description: |
+  Universal facts (historical figures, science, programming) should be
+  answered from training. The agent must NOT reach for recall_memory or
+  obsidian_search for general knowledge.
+  Regression target: "who is Winston Churchill?" previously returned
+  "I don't have information about him" because the agent over-tooled.
+input: "Who is Winston Churchill?"
+assert:
+  - text_contains: "Churchill"
+  - text_not_matches: "(?i)i don't have|i don't know|no information|cannot find"
+  - tool_not_called: recall_memory
+  - tool_not_called: obsidian_search
+  - tool_not_called: obsidian_list

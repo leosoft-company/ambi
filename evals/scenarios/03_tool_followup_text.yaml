@@ -1,0 +1,12 @@
+name: tool_followup_text
+description: |
+  After calling a tool, the agent must produce at least one short sentence
+  of text. Empty replies after tool use produced the "(empty reply)"
+  Telegram bug.
+input: "What time is it in Tokyo right now?"
+assert:
+  - tool_called: get_current_time
+  - text_matches: '(?i)tokyo|jst|asia'
+  - text_not_matches: '^\s*$'
+  # Reply should be informative but not padded with marketing speak.
+  - text_not_matches: '(?i)happy to help|let me know if'
