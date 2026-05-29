@@ -38,11 +38,33 @@ def test_init_writes_template_and_skills(monkeypatch, tmp_path, capsys):
     assert "GEMINI_API_KEY=" in paths.env_file().read_text()
     assert paths.system_md().exists()
     assert "You are ambi" in paths.system_md().read_text()
-    assert (paths.skills_dir() / "time.md").exists()
-    assert (paths.skills_dir() / "shell.md").exists()
-    assert (paths.skills_dir() / "obsidian.md").exists()
-    out = capsys.readouterr().out
-    assert "Created:" in out
+    # Built-in skills are bundled in ambi/skills/ and NOT copied by init —
+    # ~/.ambi/skills/ is for user overrides only and starts empty.
+    assert paths.skills_dir().is_dir()
+    assert list(paths.skills_dir().glob("*.md")) == []
+
+
+def test_bundled_skills_available():
+    """The shipped skills directory has the canonical built-ins."""
+    from ambi.skills import SkillRegistry
+    reg = SkillRegistry.from_dir(SkillRegistry.bundled_dir())
+    assert "time" in reg.names()
+    assert "shell" in reg.names()
+    assert "obsidian" in reg.names()
+
+
+def test_user_skill_overrides_bundled(monkeypatch, tmp_path):
+    """A skill with the same name in user dir wins."""
+    from ambi.skills import SkillRegistry
+    user_dir = tmp_path / "user_skills"
+    user_dir.mkdir()
+    (user_dir / "time.md").write_text(
+        "---\nname: time\ndescription: user override\n---\nUser's custom body."
+    )
+    reg = SkillRegistry.from_dirs(SkillRegistry.bundled_dir(), user_dir)
+    assert reg.get("time").description == "user override"
+    # Other bundled skills still present.
+    assert "obsidian" in reg.names()
 
 
 def test_init_does_not_overwrite_existing_system_md(monkeypatch, tmp_path):

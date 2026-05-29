@@ -132,7 +132,12 @@ def build_agent(
     for t in extra_tools:
         tools.register(t)
 
-    skills = SkillRegistry.from_dir(paths.skills_dir())
+    # Load bundled package skills first, then layer user skills on top.
+    # Same-name user skill wins (override the bundled default).
+    skills = SkillRegistry.from_dirs(
+        SkillRegistry.bundled_dir(),
+        paths.skills_dir(),
+    )
 
     provider = GoogleProvider(model=os.getenv("AMBI_MODEL", DEFAULT_MODEL))
     verify_reads = os.getenv("AMBI_VERIFY_READS", "0") == "1"

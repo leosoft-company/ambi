@@ -36,8 +36,8 @@ from pathlib import Path
 
 import yaml
 
-from .tool import Tool
-from .types import ToolDef
+from ..tool import Tool
+from ..types import ToolDef
 
 
 @dataclass
@@ -56,15 +56,31 @@ class SkillRegistry:
 
     @classmethod
     def from_dir(cls, path: str | Path) -> "SkillRegistry":
+        return cls.from_dirs(path)
+
+    @classmethod
+    def from_dirs(cls, *paths: str | Path) -> "SkillRegistry":
+        """Load skills from multiple directories in order.
+
+        Later directories shadow earlier ones (same skill name wins later) —
+        this is how user skills in ~/.ambi/skills/ override the bundled
+        defaults shipped in ambi/skills/.
+        """
         reg = cls()
-        skills_path = Path(path)
-        if not skills_path.is_dir():
-            return reg
-        for md_file in sorted(skills_path.glob("*.md")):
-            skill = _parse_skill_file(md_file)
-            if skill is not None:
-                reg._skills[skill.name] = skill
+        for path in paths:
+            skills_path = Path(path)
+            if not skills_path.is_dir():
+                continue
+            for md_file in sorted(skills_path.glob("*.md")):
+                skill = _parse_skill_file(md_file)
+                if skill is not None:
+                    reg._skills[skill.name] = skill
         return reg
+
+    @classmethod
+    def bundled_dir(cls) -> Path:
+        """Directory of `.md` skills shipped with the ambi-core package."""
+        return Path(__file__).parent
 
     def register(self, skill: SkillDef) -> None:
         self._skills[skill.name] = skill
