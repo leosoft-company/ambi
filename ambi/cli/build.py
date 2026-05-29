@@ -116,6 +116,18 @@ def build_agent(
         from ..scheduler import make_scheduler_tools
         for t in make_scheduler_tools(task_store):
             tools.register(t)
+
+    vault = os.getenv("OBSIDIAN_VAULT")
+    if vault:
+        from ..integrations.obsidian import VaultError, make_obsidian_tools
+        try:
+            for t in make_obsidian_tools(vault):
+                tools.register(t)
+        except VaultError as e:
+            # Vault misconfigured — log to stderr but don't crash the agent.
+            import sys
+            print(f"warning: obsidian tools not registered ({e})", file=sys.stderr)
+
     for t in extra_tools:
         tools.register(t)
 

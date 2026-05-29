@@ -40,6 +40,7 @@ def test_init_writes_template_and_skills(monkeypatch, tmp_path, capsys):
     assert "You are ambi" in paths.system_md().read_text()
     assert (paths.skills_dir() / "time.md").exists()
     assert (paths.skills_dir() / "shell.md").exists()
+    assert (paths.skills_dir() / "obsidian.md").exists()
     out = capsys.readouterr().out
     assert "Created:" in out
 

@@ -87,6 +87,34 @@ Examples:
 """
 
 
+_EXAMPLE_SKILL_OBSIDIAN = """---
+name: obsidian
+description: Read, search, write, or delete notes in the user's Obsidian vault.
+---
+
+The Obsidian vault is the user's second brain — a directory tree of
+markdown files. Skill is only useful if `obsidian_*` tools are registered
+(controlled by the `OBSIDIAN_VAULT` environment variable).
+
+Ground every claim about vault content in a tool call. Never invent note
+contents or paths.
+
+Typical flow:
+- **Find existing notes**: `obsidian_search({"query": "..."})` — full-text
+  search; falls back to `obsidian_list` for everything. Use vault-relative
+  paths returned from these for follow-up reads.
+- **Read**: `obsidian_read({"path": "Areas/Work/MOC.md"})` — full content.
+- **Save**: `obsidian_save({"title": "...", "content": "...", "folder": "Inbox", "tags": "ai,research"})`.
+  Pass the full markdown body — do not truncate or summarise into the
+  content field.
+- **Delete**: `obsidian_delete({"path": "Inbox/scratch.md"})` — destructive,
+  confirm with the user first if intent is ambiguous.
+
+Folder conventions vary by user. Don't invent folders — list first, ask
+the user where to land a new note if you're unsure.
+"""
+
+
 def _get_version() -> str:
     try:
         return version("ambi-core")
@@ -120,6 +148,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     for name, body in [
         ("time.md", _EXAMPLE_SKILL_TIME),
         ("shell.md", _EXAMPLE_SKILL_SHELL),
+        ("obsidian.md", _EXAMPLE_SKILL_OBSIDIAN),
     ]:
         skill_path = skills_dir / name
         if not skill_path.exists():
