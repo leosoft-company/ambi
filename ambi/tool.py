@@ -1,16 +1,29 @@
-from dataclasses import dataclass
+import inspect
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Literal
 
 from .types import ToolDef, ToolResultBlock
 
 ToolKind = Literal["read", "write"]
 
+ProgressCallback = Callable[[str], Awaitable[None]]
+
 
 @dataclass
 class Tool:
     definition: ToolDef
-    handler: Callable[[dict], Awaitable[str | list]]
+    handler: Callable[..., Awaitable[str | list]]
     kind: ToolKind = "read"
+    _accepts_progress: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        # Cache whether the handler accepts an optional progress callback —
+        # signature-inspected once at registration so invocation stays cheap.
+        try:
+            sig = inspect.signature(self.handler)
+            self._accepts_progress = len(sig.parameters) >= 2
+        except (TypeError, ValueError):
+            self._accepts_progress = False
 
 
 class ToolRegistry:
@@ -31,7 +44,12 @@ class ToolRegistry:
             return "read"
         return tool.kind
 
-    async def invoke(self, name: str, input: dict) -> ToolResultBlock:
+    async def invoke(
+        self,
+        name: str,
+        input: dict,
+        progress: ProgressCallback | None = None,
+    ) -> ToolResultBlock:
         tool = self._tools.get(name)
         if tool is None:
             available = ", ".join(sorted(self._tools.keys())) or "(none)"
@@ -42,9 +60,20 @@ class ToolRegistry:
                 _tool_name=name,
             )
         try:
-            result = await tool.handler(input)
+            if tool._accepts_progress:
+                # Always give a callable so handlers don't need to defend
+                # against `progress=None` — the chat() (non-streaming) path
+                # passes a no-op so progress messages are silently dropped.
+                cb = progress if progress is not None else _noop_progress
+                result = await tool.handler(input, cb)
+            else:
+                result = await tool.handler(input)
             return ToolResultBlock(tool_use_id="", content=result, _tool_name=name)
         except Exception as e:
             return ToolResultBlock(
                 tool_use_id="", content=str(e), is_error=True, _tool_name=name
             )
+
+
+async def _noop_progress(_message: str) -> None:
+    pass

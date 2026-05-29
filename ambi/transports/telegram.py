@@ -23,7 +23,12 @@ from telegram.ext import (
 
 from ..loop import Agent
 from ..scheduler import ScheduledTask, TaskStore
-from ..types import ChatComplete, SenseGateFlagEvent, TextDelta
+from ..types import (
+    ChatComplete,
+    SenseGateFlagEvent,
+    TextDelta,
+    ToolProgressEvent,
+)
 
 log = logging.getLogger(__name__)
 
@@ -345,6 +350,8 @@ class TelegramTransport:
             async for ev in self.agent.chat_stream(text):
                 if isinstance(ev, TextDelta):
                     state["buffer"] += ev.text
+                elif isinstance(ev, ToolProgressEvent):
+                    state["buffer"] += f"\n· {ev.message}\n"
                 elif isinstance(ev, SenseGateFlagEvent):
                     # The visible message currently holds a lying reply;
                     # reset and let the corrected version stream in to

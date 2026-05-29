@@ -265,6 +265,7 @@ async def _stream_turn(console, agent, user_input: str) -> None:
         ChatComplete,
         SenseGateFlagEvent,
         TextDelta,
+        ToolProgressEvent,
         ToolResultEvent,
         ToolUseEvent,
     )
@@ -292,6 +293,9 @@ async def _stream_turn(console, agent, user_input: str) -> None:
                 # dim cyan lines so the user sees activity without losing the
                 # accumulated text.
                 buffer += f"\n\n_↳ {ev.name}({_short_args(ev.input, 60)})_\n"
+                live.update(panel())
+            elif isinstance(ev, ToolProgressEvent):
+                buffer += f"_   · {ev.message}_\n"
                 live.update(panel())
             elif isinstance(ev, ToolResultEvent):
                 if ev.is_error:

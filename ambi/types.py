@@ -103,6 +103,14 @@ class ToolResultEvent:
 
 
 @dataclass
+class ToolProgressEvent:
+    """A progress message emitted by a long-running tool while it's still in flight."""
+    id: str
+    name: str
+    message: str
+
+
+@dataclass
 class SenseGateFlagEvent:
     """SenseGate detected a mismatch and is about to ask for a retry."""
     reason: str
@@ -115,7 +123,12 @@ class ChatComplete:
 
 
 AgentEvent = (
-    TextDelta | ToolUseEvent | ToolResultEvent | SenseGateFlagEvent | ChatComplete
+    TextDelta
+    | ToolUseEvent
+    | ToolProgressEvent
+    | ToolResultEvent
+    | SenseGateFlagEvent
+    | ChatComplete
 )
 
 

@@ -19,6 +19,7 @@ from .types import (
     TextChunk,
     TextDelta,
     ToolCallChunk,
+    ToolProgressEvent,
     ToolResultBlock,
     ToolResultEvent,
     ToolUseBlock,
@@ -233,18 +234,67 @@ class Agent:
                     yield ChatComplete(final_text=final_text)
                     return
 
-                # Tool calls — invoke them in parallel.
+                # Tool calls — invoke them in parallel and forward any
+                # progress messages they emit while in flight.
                 use_blocks = [b for b in content if isinstance(b, ToolUseBlock)]
-                results = await asyncio.gather(
-                    *(self._invoke_with_timeout(c) for c in use_blocks)
-                )
-                for call, res in zip(use_blocks, results):
+                progress_q: asyncio.Queue = asyncio.Queue()
+
+                def _make_progress_cb(call_id: str, call_name: str):
+                    async def cb(message: str) -> None:
+                        await progress_q.put(
+                            ToolProgressEvent(
+                                id=call_id, name=call_name, message=message,
+                            )
+                        )
+                    return cb
+
+                tool_tasks = {
+                    asyncio.create_task(
+                        self._invoke_with_timeout(
+                            call,
+                            progress=_make_progress_cb(call.id, call.name),
+                        )
+                    ): call
+                    for call in use_blocks
+                }
+                # Drain progress events while any tool task is still running.
+                pending = set(tool_tasks.keys())
+                while pending:
+                    getter = asyncio.create_task(progress_q.get())
+                    done, _ = await asyncio.wait(
+                        pending | {getter},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if getter in done:
+                        yield getter.result()
+                    else:
+                        getter.cancel()
+                        try:
+                            await getter
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    pending -= done
+
+                # Drain any progress events that arrived after the last task
+                # completed but before we exited the loop.
+                while not progress_q.empty():
+                    yield progress_q.get_nowait()
+
+                # Now assemble results in original order.
+                results: list[ToolResultBlock] = []
+                for call in use_blocks:
+                    res = next(
+                        (t.result() for t in tool_tasks if tool_tasks[t] is call),
+                        None,
+                    )
+                    assert res is not None  # all tasks are done at this point
                     res.tool_use_id = call.id
                     invocations.append(
                         ToolInvocation(
                             call=call, result=res, kind=self.tools.kind(call.name)
                         )
                     )
+                    results.append(res)
                     yield ToolResultEvent(
                         id=call.id,
                         name=call.name,
@@ -430,10 +480,14 @@ class Agent:
             )
         return _final_text(result.content).strip()
 
-    async def _invoke_with_timeout(self, call: ToolUseBlock) -> ToolResultBlock:
+    async def _invoke_with_timeout(
+        self,
+        call: ToolUseBlock,
+        progress=None,
+    ) -> ToolResultBlock:
         try:
             return await asyncio.wait_for(
-                self.tools.invoke(call.name, call.input),
+                self.tools.invoke(call.name, call.input, progress=progress),
                 timeout=self.tool_timeout,
             )
         except asyncio.TimeoutError:

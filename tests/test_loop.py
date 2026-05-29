@@ -888,3 +888,110 @@ async def test_anchor_persists_to_store_and_reloads(tmp_path):
     assert a2.anchors[0].from_seq == original_anchor.from_seq
     assert a2.anchors[0].to_seq == original_anchor.to_seq
     assert a2.anchors[0].summary == original_anchor.summary
+
+
+# ---------- streaming tool progress ----------
+
+
+async def test_progress_aware_tool_yields_progress_events():
+    """A handler with a (input, progress) signature gets a callback and its
+    progress messages surface as ToolProgressEvent in chat_stream."""
+    tools = ToolRegistry()
+
+    async def slow_with_progress(args, progress):
+        await progress("starting…")
+        await progress("halfway…")
+        await progress("done")
+        return "final result"
+
+    tools.register(Tool(
+        definition=ToolDef(
+            name="slow",
+            description="slow tool",
+            input_schema={"type": "object", "properties": {}, "required": []},
+        ),
+        handler=slow_with_progress,
+    ))
+
+    provider = MockStreamProvider([
+        [
+            ToolCallChunk(id="t1", name="slow", input={}),
+            StreamEnd(stop_reason="tool_use"),
+        ],
+        [
+            TextChunk(text="ok"),
+            StreamEnd(stop_reason="end_turn"),
+        ],
+    ])
+
+    agent = Agent(provider=provider, tools=tools, system="s")
+    events = [ev async for ev in agent.chat_stream("go")]
+
+    from ambi.types import ToolProgressEvent
+    progress = [e for e in events if isinstance(e, ToolProgressEvent)]
+    assert [p.message for p in progress] == ["starting…", "halfway…", "done"]
+    assert all(p.id == "t1" and p.name == "slow" for p in progress)
+
+    # ToolResultEvent comes after all progress events
+    progress_indices = [i for i, e in enumerate(events) if isinstance(e, ToolProgressEvent)]
+    result_index = next(i for i, e in enumerate(events) if isinstance(e, ToolResultEvent))
+    assert max(progress_indices) < result_index
+
+    result = next(e for e in events if isinstance(e, ToolResultEvent))
+    assert result.content == "final result"
+
+
+async def test_legacy_tool_works_without_progress_arg():
+    """Handlers with the single-arg signature still work, no progress events emitted."""
+    tools = ToolRegistry()
+
+    async def plain(args):
+        return "done"
+
+    tools.register(_tool("plain", plain))
+
+    provider = MockStreamProvider([
+        [
+            ToolCallChunk(id="t1", name="plain", input={}),
+            StreamEnd(stop_reason="tool_use"),
+        ],
+        [TextChunk(text="ok"), StreamEnd(stop_reason="end_turn")],
+    ])
+    agent = Agent(provider=provider, tools=tools, system="s")
+    events = [ev async for ev in agent.chat_stream("go")]
+
+    from ambi.types import ToolProgressEvent
+    progress = [e for e in events if isinstance(e, ToolProgressEvent)]
+    assert progress == []
+
+
+async def test_chat_path_ignores_progress_callbacks():
+    """Non-streaming chat() doesn't need progress; tools that emit it still work."""
+    tools = ToolRegistry()
+
+    async def with_progress(args, progress):
+        await progress("noise")
+        return "ok"
+
+    tools.register(Tool(
+        definition=ToolDef(
+            name="x",
+            description="x",
+            input_schema={"type": "object", "properties": {}, "required": []},
+        ),
+        handler=with_progress,
+    ))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(id="t1", name="x", input={})],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("done")], stop_reason="end_turn"),
+    ])
+    agent = Agent(provider=provider, tools=tools, system="s")
+    text = await agent.chat("go")
+    assert text == "done"
+    # The result block should have the tool's final return value.
+    res = agent.messages[2].content[0]
+    assert res.content == "ok"
