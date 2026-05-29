@@ -125,8 +125,50 @@ def _make_handlers(vault: Path, default_folder: str):
         root = _resolve_under_vault(vault, folder) if folder else vault.resolve()
         if not root.is_dir():
             return f"Error: '{folder or '.'}' is not a directory."
+
+        paths = sorted(root.rglob("*.md"))
+
+        # For huge result sets — common when listing a whole vault root — a
+        # full path dump (a) overflows the agent's context window and (b)
+        # isn't useful. Switch to a folder-breakdown summary that tells the
+        # agent how to drill in.
+        SUMMARY_THRESHOLD = 100
+        if len(paths) > SUMMARY_THRESHOLD:
+            files_at_root = 0
+            subfolder_counts: dict[str, int] = {}
+            for path in paths:
+                rel = path.relative_to(root)
+                if len(rel.parts) == 1:
+                    files_at_root += 1
+                else:
+                    head = rel.parts[0]
+                    subfolder_counts[head] = subfolder_counts.get(head, 0) + 1
+
+            scope = f" under '{folder}'" if folder else ""
+            lines = [
+                f"{len(paths)} notes found{scope} (too many to list — showing folder breakdown):",
+                "",
+            ]
+            if files_at_root:
+                lines.append(f"  ./   {files_at_root} note(s) at the top of this scope")
+            for name, count in sorted(
+                subfolder_counts.items(), key=lambda x: (-x[1], x[0])
+            ):
+                sub = f"{folder}/{name}" if folder else name
+                lines.append(f"  {sub}/   {count} note(s)")
+            lines.append("")
+            lines.append(
+                'Use obsidian_list({"folder": "<path>"}) to drill into a '
+                'specific folder, or obsidian_search({"query": "..."}) to '
+                'find notes by content.'
+            )
+            return "\n".join(lines)
+
+        if not paths:
+            return "(no notes found)"
+
         rows: list[str] = []
-        for path in sorted(root.rglob("*.md")):
+        for path in paths:
             rel = path.relative_to(vault.resolve())
             text = _read_safe(path)
             meta, _ = _parse_frontmatter(text)
@@ -134,8 +176,6 @@ def _make_handlers(vault: Path, default_folder: str):
             tags = meta.get("tags") or []
             tag_str = f" [{','.join(str(t) for t in tags)}]" if tags else ""
             rows.append(f"{rel} — {title}{tag_str}")
-        if not rows:
-            return "(no notes found)"
         return "\n".join(rows)
 
     async def search(args: dict) -> str:

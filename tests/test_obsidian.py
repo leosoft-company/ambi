@@ -271,3 +271,55 @@ def test_tool_kinds(tmp_path):
     assert tools["obsidian_list"].kind == "read"
     assert tools["obsidian_search"].kind == "read"
     assert tools["obsidian_read"].kind == "read"
+
+
+# ---------- large-vault summary behaviour ----------
+
+
+async def test_list_huge_vault_returns_folder_breakdown(tmp_path):
+    """When > 100 notes at the listed scope, return a folder breakdown
+    instead of every path (otherwise the result clips in the agent's
+    context window)."""
+    save = _tools(tmp_path)["obsidian_save"]
+    # 60 in Inbox, 50 in Areas/Work, 30 in Resources/Reading = 140
+    for i in range(60):
+        await save.handler({"title": f"i{i}", "content": "x", "folder": "Inbox"})
+    for i in range(50):
+        await save.handler({"title": f"a{i}", "content": "x", "folder": "Areas/Work"})
+    for i in range(30):
+        await save.handler({"title": f"r{i}", "content": "x", "folder": "Resources/Reading"})
+
+    list_t = _tools(tmp_path)["obsidian_list"]
+    result = await list_t.handler({})
+    assert "140 notes found" in result
+    assert "too many to list" in result
+    assert "Inbox/" in result
+    assert "60 note" in result
+    # No individual paths should appear in summary mode
+    assert "i0.md" not in result
+    assert "obsidian_list" in result  # drill-in hint present
+
+
+async def test_list_under_threshold_still_returns_paths(tmp_path):
+    save = _tools(tmp_path)["obsidian_save"]
+    for i in range(5):
+        await save.handler({"title": f"n{i}", "content": "x"})
+
+    list_t = _tools(tmp_path)["obsidian_list"]
+    result = await list_t.handler({})
+    assert "n0.md" in result
+    assert "too many" not in result
+
+
+async def test_list_summary_for_folder_uses_subfolder_breakdown(tmp_path):
+    save = _tools(tmp_path)["obsidian_save"]
+    for i in range(60):
+        await save.handler({"title": f"w{i}", "content": "x", "folder": "Areas/Work"})
+    for i in range(50):
+        await save.handler({"title": f"h{i}", "content": "x", "folder": "Areas/Health"})
+
+    list_t = _tools(tmp_path)["obsidian_list"]
+    result = await list_t.handler({"folder": "Areas"})
+    assert "110 notes found under 'Areas'" in result
+    assert "Areas/Work/" in result
+    assert "Areas/Health/" in result
