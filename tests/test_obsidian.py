@@ -2,7 +2,7 @@
 
 import pytest
 
-from ambi.integrations.obsidian import (
+from ambi.skills.obsidian.tools import (
     VaultError,
     _parse_frontmatter,
     _resolve_under_vault,
@@ -91,7 +91,7 @@ async def test_save_defaults_to_inbox(tmp_path):
 
 async def test_save_custom_default_folder(tmp_path):
     """default_folder parameter overrides Inbox."""
-    from ambi.integrations.obsidian import make_obsidian_tools
+    from ambi.skills.obsidian.tools import make_obsidian_tools
 
     tools = {t.definition.name: t for t in make_obsidian_tools(tmp_path, default_folder="Capture")}
     await tools["obsidian_save"].handler({"title": "x", "content": "body"})
@@ -100,7 +100,7 @@ async def test_save_custom_default_folder(tmp_path):
 
 async def test_save_empty_default_folder_lands_at_root(tmp_path):
     """default_folder='' restores old behaviour: save at vault root."""
-    from ambi.integrations.obsidian import make_obsidian_tools
+    from ambi.skills.obsidian.tools import make_obsidian_tools
 
     tools = {t.definition.name: t for t in make_obsidian_tools(tmp_path, default_folder="")}
     await tools["obsidian_save"].handler({"title": "x", "content": "body"})

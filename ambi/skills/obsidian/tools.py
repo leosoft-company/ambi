@@ -21,8 +21,8 @@ from pathlib import Path
 
 import yaml
 
-from ..tool import Tool
-from ..types import ToolDef
+from ...tool import Tool, ToolRegistry
+from ...types import ToolDef
 
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
@@ -331,3 +331,29 @@ def make_obsidian_tools(
             kind="write",
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Skill bootstrap — called by ambi/cli/build.py at agent startup.
+# ---------------------------------------------------------------------------
+
+
+def register(tools: ToolRegistry) -> None:
+    """Wire obsidian_* tools into the registry if OBSIDIAN_VAULT is set.
+
+    Reads OBSIDIAN_VAULT (required) and OBSIDIAN_DEFAULT_FOLDER (optional,
+    defaults to "Inbox"). Silently no-ops if no vault is configured; logs a
+    warning to stderr if the path is invalid.
+    """
+    import os
+    import sys
+
+    vault = os.getenv("OBSIDIAN_VAULT")
+    if not vault:
+        return
+    default_folder = os.getenv("OBSIDIAN_DEFAULT_FOLDER", "Inbox")
+    try:
+        for t in make_obsidian_tools(vault, default_folder=default_folder):
+            tools.register(t)
+    except VaultError as e:
+        print(f"warning: obsidian tools not registered ({e})", file=sys.stderr)

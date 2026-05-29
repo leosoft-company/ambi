@@ -62,8 +62,13 @@ class SkillRegistry:
     def from_dirs(cls, *paths: str | Path) -> "SkillRegistry":
         """Load skills from multiple directories in order.
 
-        Later directories shadow earlier ones (same skill name wins later) —
-        this is how user skills in ~/.ambi/skills/ override the bundled
+        Two layouts are supported in each directory:
+
+          1. Skill package:   <name>/SKILL.md  (preferred, can colocate tools)
+          2. Flat skill file: <name>.md         (legacy, no tools)
+
+        Later directories shadow earlier ones — same skill name wins later.
+        That's how user skills in ~/.ambi/skills/ override the bundled
         defaults shipped in ambi/skills/.
         """
         reg = cls()
@@ -71,6 +76,20 @@ class SkillRegistry:
             skills_path = Path(path)
             if not skills_path.is_dir():
                 continue
+
+            # Skill packages: <name>/SKILL.md
+            for entry in sorted(skills_path.iterdir()):
+                if not entry.is_dir():
+                    continue
+                skill_md = entry / "SKILL.md"
+                if skill_md.exists():
+                    skill = _parse_skill_file(skill_md)
+                    if skill is not None:
+                        # Use the directory name as the skill name if frontmatter
+                        # didn't override it.
+                        reg._skills[skill.name] = skill
+
+            # Legacy flat .md files at the top level.
             for md_file in sorted(skills_path.glob("*.md")):
                 skill = _parse_skill_file(md_file)
                 if skill is not None:
@@ -174,6 +193,36 @@ _CATALOG_PREAMBLE = (
     "acting. Don't load skills speculatively — only when you've decided one "
     "is needed."
 )
+
+
+def register_bundled_skill_tools(tools) -> None:
+    """Walk ambi/skills/* for skill packages that ship a `tools.py` and
+    call their `register(tool_registry)` entry point.
+
+    Each bundled skill self-decides whether to wire any tools (typically
+    by checking an env var like OBSIDIAN_VAULT).
+    """
+    import importlib
+
+    bundled_dir = SkillRegistry.bundled_dir()
+    for entry in sorted(bundled_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        tools_module = entry / "tools.py"
+        if not tools_module.exists():
+            continue
+        try:
+            mod = importlib.import_module(f"ambi.skills.{entry.name}.tools")
+        except Exception as e:
+            import sys
+            print(
+                f"warning: failed to import ambi.skills.{entry.name}.tools ({e})",
+                file=sys.stderr,
+            )
+            continue
+        register = getattr(mod, "register", None)
+        if callable(register):
+            register(tools)
 
 
 def assemble_system(base: str, registry: SkillRegistry | None) -> str:

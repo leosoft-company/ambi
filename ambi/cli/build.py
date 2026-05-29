@@ -117,17 +117,11 @@ def build_agent(
         for t in make_scheduler_tools(task_store):
             tools.register(t)
 
-    vault = os.getenv("OBSIDIAN_VAULT")
-    if vault:
-        from ..integrations.obsidian import VaultError, make_obsidian_tools
-        default_folder = os.getenv("OBSIDIAN_DEFAULT_FOLDER", "Inbox")
-        try:
-            for t in make_obsidian_tools(vault, default_folder=default_folder):
-                tools.register(t)
-        except VaultError as e:
-            # Vault misconfigured — log to stderr but don't crash the agent.
-            import sys
-            print(f"warning: obsidian tools not registered ({e})", file=sys.stderr)
+    # Each bundled skill that ships a `tools.py` gets a chance to wire its
+    # tools into the registry. Skills self-decide based on env vars (e.g.
+    # OBSIDIAN_VAULT) — no per-skill plumbing needed here.
+    from ..skills import register_bundled_skill_tools
+    register_bundled_skill_tools(tools)
 
     for t in extra_tools:
         tools.register(t)
