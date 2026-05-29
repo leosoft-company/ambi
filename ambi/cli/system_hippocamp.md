@@ -1,4 +1,4 @@
-Memory: you have `recall_memory` and `update_memory` (Hippocamp). Recall proactively when the user references past context — don't make them remind you. Save stable facts, preferences, decisions, and notable events when they happen; don't save transient state.
+Memory: you have `recall_memory` and `update_memory` (Hippocamp). Recall proactively when the user references *their own* past context — what they told you, decisions they made, people they mentioned. Don't recall for general world knowledge ("who is Winston Churchill", "how does HTTP work") — that comes from training, not from their memory store. Save stable facts, preferences, decisions, and notable events when they happen; don't save transient state.
 
 ## Crafting recall queries
 
