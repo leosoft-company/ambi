@@ -23,11 +23,14 @@ from telegram.ext import (
 
 from ..loop import Agent
 from ..scheduler import ScheduledTask, TaskStore
+from ..types import ChatComplete, SenseGateFlagEvent, TextDelta
 
 log = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LEN = 4096
 TYPING_REFRESH_SECONDS = 4
+EDIT_INTERVAL_SECONDS = 1.0  # Throttle: at most 1 progressive edit per second
+EDIT_MIN_DELTA_CHARS = 20    # Skip edits smaller than this to avoid noise
 
 
 def _get_reply_context(message) -> str | None:
@@ -283,18 +286,93 @@ class TelegramTransport:
         chat_id = update.effective_chat.id
         typing_task = asyncio.create_task(self._typing_loop(ctx, chat_id))
         try:
-            reply = await asyncio.wait_for(
-                self.agent.chat(text), timeout=self.chat_timeout,
+            await asyncio.wait_for(
+                self._stream_reply(update, text), timeout=self.chat_timeout,
             )
         except asyncio.TimeoutError:
-            reply = f"(chat timed out after {self.chat_timeout}s)"
+            await update.message.reply_text(
+                f"(chat timed out after {self.chat_timeout}s)"
+            )
         except Exception as e:
             log.exception("telegram_chat_error")
-            reply = f"Error: {type(e).__name__}: {e}"
+            await update.message.reply_text(f"Error: {type(e).__name__}: {e}")
         finally:
             typing_task.cancel()
 
-        await self._send_split(update, reply)
+    async def _stream_reply(self, update: Update, text: str) -> None:
+        """Drive `chat_stream` through a placeholder message we edit in place.
+
+        Telegram rate-limits message edits, so we throttle to one edit per
+        second and only push when the buffer has grown non-trivially. The
+        final flush after streaming guarantees the user sees the complete
+        reply even if the edit loop missed the last delta.
+        """
+        # Initial placeholder — gives us a message_id to edit into.
+        placeholder = await update.message.reply_text("…")
+
+        # Shared state between the producer (chat_stream loop) and the
+        # consumer (periodic editor task).
+        state = {"buffer": "", "last_edited": "", "done": False}
+
+        async def edit_loop():
+            try:
+                while not state["done"]:
+                    await asyncio.sleep(EDIT_INTERVAL_SECONDS)
+                    snapshot = state["buffer"][:TELEGRAM_MAX_LEN]
+                    if not snapshot or snapshot == state["last_edited"]:
+                        continue
+                    if (
+                        state["last_edited"]
+                        and len(snapshot) - len(state["last_edited"])
+                        < EDIT_MIN_DELTA_CHARS
+                    ):
+                        continue
+                    try:
+                        await placeholder.edit_text(snapshot)
+                        state["last_edited"] = snapshot
+                    except BadRequest as e:
+                        # "Message is not modified" — fine, ignore.
+                        if "not modified" not in str(e).lower():
+                            log.warning("telegram_edit_failed: %s", e)
+                    except Exception as e:
+                        log.warning("telegram_edit_error: %s", e)
+            except asyncio.CancelledError:
+                pass
+
+        editor_task = asyncio.create_task(edit_loop())
+
+        try:
+            async for ev in self.agent.chat_stream(text):
+                if isinstance(ev, TextDelta):
+                    state["buffer"] += ev.text
+                elif isinstance(ev, SenseGateFlagEvent):
+                    # The visible message currently holds a lying reply;
+                    # reset and let the corrected version stream in to
+                    # replace it on the next edit cycle.
+                    state["buffer"] = ""
+                    state["last_edited"] = ""
+                elif isinstance(ev, ChatComplete):
+                    # Final text already in buffer; loop is about to exit.
+                    pass
+        finally:
+            state["done"] = True
+            editor_task.cancel()
+
+        # Final flush — covers the case where streaming finished before the
+        # last edit_loop tick fired, AND where the reply overflows 4096.
+        final = state["buffer"] or "(empty reply)"
+        chunks = split_message(final)
+        try:
+            if chunks[0] != state["last_edited"]:
+                await placeholder.edit_text(chunks[0])
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                log.warning("telegram_final_edit_failed: %s", e)
+        for chunk in chunks[1:]:
+            try:
+                await update.message.reply_text(chunk)
+            except BadRequest as e:
+                log.warning("telegram_overflow_send_failed: %s", e)
 
     async def _typing_loop(self, ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
         try:
