@@ -170,21 +170,92 @@ reply = await agent.chat("hello")
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for component graph, runtime
-sequence, and the provider seam contract. Short version:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for component graph, runtime sequence, the provider seam contract, and how to extend with new skills. Short version:
 
 ```
 caller ─► Agent ─► LLMProvider (Protocol) ─► GoogleProvider ─► Gemini
             │
-            ├─► ToolRegistry  (user tools + auto-registered load_skill / scheduler / mcp)
-            ├─► SkillRegistry (catalog spliced into system prompt)
-            ├─► SenseGate     (post-turn claim verifier)
+            ├─► ToolRegistry  (user tools + load_skill / scheduler / MCP / skill-bundled tools)
+            ├─► SkillRegistry (bundled ambi/skills/* + user ~/.ambi/skills/* — catalog in system prompt)
+            ├─► SenseGate     (post-turn claim verifier, block-and-retry on writes)
             └─► SqliteStore   (durable session)
 ```
 
 ## Adding more LLM providers
 
 Implement the `LLMProvider` protocol (`complete(messages, tools, system, **kw) -> CompletionResult`). The only adapter shipped is `GoogleProvider` for Gemini via `google-genai`. Anthropic/OpenAI/local-model adapters slot in the same way — see `ambi/providers/google.py` for the normalized ↔ provider-native translation pattern.
+
+## Extending — adding a skill
+
+Each skill is a **self-contained directory** under `ambi/skills/<name>/` with a `SKILL.md` (prose guidance for the model) and an optional `tools.py` (Python implementations + a `register()` entry point). The agent discovers and wires them automatically — no edits to `build.py`, the registry, or the agent loop.
+
+```
+ambi/skills/
+  time/SKILL.md                  ← prose only
+  shell/SKILL.md                 ← prose only
+  obsidian/
+    SKILL.md                     ← prose: PARA conventions, default-to-Inbox
+    tools.py                     ← obsidian_save / list / search / read / delete
+                                    + def register(tools): wires them if OBSIDIAN_VAULT set
+```
+
+To add a new tool-bearing skill — say, `weather`:
+
+```
+ambi/skills/weather/
+  __init__.py    (empty)
+  SKILL.md       prose
+  tools.py       handlers + def register(tools): ...
+```
+
+**`SKILL.md`**:
+
+```markdown
+---
+name: weather
+description: When the user asks about current weather or forecasts.
+---
+
+Use `get_weather(location)` to fetch live conditions. Return temperature,
+condition, and a one-line outlook — no padding.
+```
+
+**`tools.py`**:
+
+```python
+import os
+from ambi.tool import Tool, ToolRegistry
+from ambi.types import ToolDef
+
+async def _get_weather(args: dict) -> str:
+    # ... call your favourite weather API ...
+    return f"{args['location']}: 18°C, partly cloudy."
+
+def register(tools: ToolRegistry) -> None:
+    if not os.getenv("WEATHER_API_KEY"):
+        return                      # skill stays dormant, no error
+    tools.register(Tool(
+        definition=ToolDef(
+            name="get_weather",
+            description="Get current weather for a location.",
+            input_schema={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        ),
+        handler=_get_weather,
+        kind="read",                # write tools get gated by SenseGate
+    )),
+```
+
+`register_bundled_skill_tools()` picks this up at agent startup. Skills self-decide whether they're configured — users without `WEATHER_API_KEY` get a dormant skill the catalog mentions but the model won't call.
+
+**Prose-only skills** (no `tools.py`) are also valid — when the underlying tool already exists in another layer (e.g. the `shell` skill points at the built-in `run_command`).
+
+**User overrides:** drop `~/.ambi/skills/<name>/SKILL.md` (or a flat `<name>.md`) to shadow the bundled prose of the same skill. Same-name user skills win the catalog slot, but Python tools always come from the installed package — users can't inject code at runtime.
+
+See [ARCHITECTURE.md § Skills](ARCHITECTURE.md#skills--progressive-disclosure-as-self-contained-packages) for the full design rationale (advisory-vs-authoritative, registration ordering, override precedence).
 
 ## Trust model
 
@@ -238,24 +309,32 @@ uv run pytest                  # both
 
 ```
 ambi/
-  loop.py             Agent and chat() loop
-  types.py            Message/Block/ToolDef/CompletionResult
+  loop.py             Agent (chat + chat_stream), MaxTurnsExceeded
+  types.py            Message/Block, CompletionResult, streaming events
+  tool.py             Tool, ToolRegistry, ToolKind (read/write)
   provider.py         LLMProvider Protocol
-  providers/google.py Gemini adapter
-  tool.py             Tool, ToolRegistry, ToolKind
-  skills.py           Skill discovery, catalog, load_skill tool
-  sensegate.py        Action verifier (LLM judge + audit log)
-  scheduler.py        TaskStore, Scheduler, schedule()/list/cancel tools
-  store.py            SqliteStore (session persistence)
+  providers/google.py Gemini adapter (google-genai)
+  skills/             Bundled self-contained skill packages
+    __init__.py         SkillRegistry, load_skill, register_bundled_skill_tools
+    time/SKILL.md
+    shell/SKILL.md
+    obsidian/
+      SKILL.md          prose guidance
+      tools.py          implementation + register() entry point
+  sensegate.py        Post-turn action verifier (LLM judge + audit log)
+  scheduler.py        TaskStore + Scheduler + schedule()/list/cancel tools
+  store.py            SqliteStore (durable session persistence)
   run_command.py      Allowlisted external commands
   mcp.py              McpServer + mcp_tools() wrapper
-  integrations/       hippocamp/ — worked MCP example
-  transports/         telegram/ — Telegram polling adapter
-examples/
-  repl.py             Terminal REPL
-  telegram_bot.py     Telegram bot (with scheduler + Hippocamp)
-  skills/             Demo skills
-tests/                pytest, asyncio-mode auto
+  integrations/
+    hippocamp.py        MCP server wrapper for Hippocamp memory
+  transports/
+    telegram.py         Telegram polling + streaming progressive edits
+  cli/                `ambi` subcommands: init / run / chat / version
+    system.md           bundled default personality
+examples/             Raw library API demos (repl.py, telegram_bot.py)
+tests/                pytest, asyncio-mode auto (180 unit + 3 live smoke)
+docs/                 Demo SVG + render script
 ```
 
 ## License
