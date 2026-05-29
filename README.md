@@ -1,16 +1,14 @@
 # ambi-core
 
-A provider-agnostic personal-agent harness. It runs a single continuous
-conversation against any LLM, with first-class skills, action verification,
-external tool execution, MCP integration, persistent history, scheduled
-tasks, and Telegram delivery.
+> **ambi** — *ambient memory-backed intelligence*. A personal-agent harness that runs always-on, remembers via [Hippocamp](https://github.com/leosoft-company/hippocamp), and verifies what it does.
 
-Built as the runtime half of a personal-AI stack. Pair it with
-[Hippocamp](https://github.com/leosoft-company/hippocamp) for long-term
-memory that follows you across hosts.
+A provider-agnostic agent runtime: a single continuous conversation against any LLM, with first-class skills, action verification (SenseGate), external tool execution, MCP integration, persistent history, scheduled tasks, and Telegram delivery.
 
-> Status: alpha. Working end-to-end against Gemini 2.5 Flash; API may
-> change before 1.0.
+Built as the runtime half of a personal-AI stack. Pair it with Hippocamp for long-term memory that follows you across hosts.
+
+![ambi chat REPL demo](docs/demo.svg)
+
+> Status: alpha. Working end-to-end against Gemini 2.5 Flash; API may change before 1.0.
 
 ---
 
