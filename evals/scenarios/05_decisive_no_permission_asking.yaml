@@ -1,0 +1,14 @@
+name: decisive_no_permission_asking
+description: |
+  system.md says "Don't ask permission for routine work" and "Don't
+  triple-check before acting on a clear request." A clear factual
+  question should get a direct answer, not "Would you like me to look
+  that up?" The Sharp-Intern voice should be observant but decisive.
+input: "what's 12 times 17?"
+assert:
+  - text_contains: "204"
+  # No "may I" / "would you like" hedging on a clear request
+  - text_not_matches: '(?i)would you like me to|do you want me to|may i|shall i'
+  # No tools needed for arithmetic
+  - tool_not_called: run_command
+  - tool_not_called: get_current_time

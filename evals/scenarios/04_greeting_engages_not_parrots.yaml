@@ -1,0 +1,21 @@
+name: greeting_engages_not_parrots
+description: |
+  When system.md had literal voice examples ("User: hey -> You: hey."),
+  the model copied them verbatim, returning the single word "hey." to
+  every casual greeting ("hey", "how's it going?", "sup"). We removed the
+  examples and replaced with prose register guidance. A non-"hey"
+  greeting should now produce a non-trivial response that actually
+  engages — not the single-word parrot.
+input: "how's it going?"
+assert:
+  # The exact symptom of the bug: response is just "hey." or "hi."
+  - text_not_matches: '^\s*hey\.?\s*$'
+  - text_not_matches: '^\s*hi\.?\s*$'
+  # Engage with the question — should mention status, work, or ask back
+  - text_matches: '\w+\s+\w+'
+  # Stay in voice: no padding marketing speak
+  - text_not_matches: '(?i)happy to help|let me know if'
+  # Small talk shouldn't trigger memory or vault tools
+  - tool_not_called: recall_memory
+  - tool_not_called: obsidian_search
+  - tool_not_called: obsidian_list
