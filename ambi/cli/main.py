@@ -25,6 +25,20 @@ from pathlib import Path
 from . import paths
 
 
+def _load_runtime_env() -> None:
+    """Load env from ~/.ambi/.env then a project-local .env (overrides).
+
+    Running `ambi chat` / `ambi run` from a project directory with a
+    local .env (the dev case) lets you experiment without touching your
+    daily ~/.ambi/.env. Outside a project, only ~/.ambi/.env is loaded.
+    """
+    from ..env import load_env
+    load_env(paths.env_file())
+    local = Path.cwd() / ".env"
+    if local.exists() and local.resolve() != paths.env_file().resolve():
+        load_env(local, override=True)
+
+
 _ENV_TEMPLATE = """# ambi config. Edit this file then run `ambi run`.
 
 # === required ===
@@ -181,7 +195,6 @@ async def _run_chat() -> int:
 
     from rich.live import Live
 
-    from ..env import load_env
     from ..integrations.hippocamp import hippocamp_server, load_hippocamp_tools
     from ..types import (
         ChatComplete,
@@ -197,7 +210,7 @@ async def _run_chat() -> int:
 
     from ..scheduler import TaskStore
 
-    load_env(paths.env_file())
+    _load_runtime_env()
     paths.ensure_tree()
 
     console = Console()
@@ -448,14 +461,14 @@ def _render_audit(console, agent) -> None:
 
 
 async def _run_daemon() -> int:
-    from ..env import load_env, require_env
+    from ..env import require_env
     from ..integrations.hippocamp import hippocamp_server, load_hippocamp_tools
     from ..scheduler import ScheduledTask, Scheduler, TaskStore
     from ..tool import Tool
     from ..transports.telegram import TelegramTransport, split_message
     from .build import build_agent
 
-    load_env(paths.env_file())
+    _load_runtime_env()
     paths.ensure_tree()
 
     if not os.getenv("TELEGRAM_BOT_TOKEN"):
