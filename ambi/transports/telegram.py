@@ -28,6 +28,8 @@ from ..types import (
     SenseGateFlagEvent,
     TextDelta,
     ToolProgressEvent,
+    ToolResultEvent,
+    ToolUseEvent,
 )
 
 log = logging.getLogger(__name__)
@@ -319,6 +321,14 @@ class TelegramTransport:
         # consumer (periodic editor task).
         state = {"buffer": "", "last_edited": "", "done": False}
 
+        # The agent emits ChatComplete with the canonical final reply text.
+        # We keep it separately so the final flush can prefer it over the
+        # streaming buffer (which may contain progress noise that SenseGate
+        # cleared during a retry). Also track what tools ran so we can show
+        # an informative fallback when both buffer and final_text are empty.
+        final_text_from_agent = ""
+        tools_used: list[tuple[str, bool]] = []  # (name, is_error)
+
         async def edit_loop():
             try:
                 while not state["done"]:
@@ -350,8 +360,13 @@ class TelegramTransport:
             async for ev in self.agent.chat_stream(text):
                 if isinstance(ev, TextDelta):
                     state["buffer"] += ev.text
+                elif isinstance(ev, ToolUseEvent):
+                    tools_used.append((ev.name, False))
                 elif isinstance(ev, ToolProgressEvent):
                     state["buffer"] += f"\n· {ev.message}\n"
+                elif isinstance(ev, ToolResultEvent):
+                    if ev.is_error and tools_used:
+                        tools_used[-1] = (tools_used[-1][0], True)
                 elif isinstance(ev, SenseGateFlagEvent):
                     # The visible message currently holds a lying reply;
                     # reset and let the corrected version stream in to
@@ -359,15 +374,31 @@ class TelegramTransport:
                     state["buffer"] = ""
                     state["last_edited"] = ""
                 elif isinstance(ev, ChatComplete):
-                    # Final text already in buffer; loop is about to exit.
-                    pass
+                    final_text_from_agent = ev.final_text
         finally:
             state["done"] = True
             editor_task.cancel()
 
-        # Final flush — covers the case where streaming finished before the
-        # last edit_loop tick fired, AND where the reply overflows 4096.
-        final = state["buffer"] or "(empty reply)"
+        # Final flush — prefer the agent's canonical final_text (from
+        # ChatComplete) over the streaming buffer. The buffer may have been
+        # cleared mid-flight by a SenseGate retry; the agent's final_text
+        # is what it ultimately wants to say. Fall back to buffer (progress
+        # + text accumulated), then to an informative placeholder.
+        if final_text_from_agent.strip():
+            final = final_text_from_agent
+        elif state["buffer"].strip():
+            final = state["buffer"]
+        else:
+            # Truly empty — surface what we know happened.
+            if tools_used:
+                names = ", ".join(name for name, _ in tools_used)
+                errors = [name for name, err in tools_used if err]
+                if errors:
+                    final = f"(ran {names} — errored: {', '.join(errors)})"
+                else:
+                    final = f"(ran {names} — no follow-up text)"
+            else:
+                final = "(empty reply)"
         chunks = split_message(final)
         try:
             if chunks[0] != state["last_edited"]:
