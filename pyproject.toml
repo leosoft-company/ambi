@@ -34,6 +34,9 @@ dev = [
 ]
 hippocamp = ["hippocamp>=0.11"]
 
+[project.scripts]
+ambi = "ambi.cli.main:main"
+
 [project.urls]
 Homepage = "https://github.com/leosoft-company/ambi"
 Repository = "https://github.com/leosoft-company/ambi"

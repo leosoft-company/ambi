@@ -32,18 +32,27 @@ memory that follows you across hosts.
 ## Quick start
 
 ```bash
+pip install "ambi-core[hippocamp]"   # drop [hippocamp] if you don't want long-term memory
+ambi init                            # creates ~/.ambi/ with .env template + example skills
+# edit ~/.ambi/.env — add GEMINI_API_KEY, optionally TELEGRAM_BOT_TOKEN + your user ID
+
+ambi chat                            # local REPL
+ambi run                             # daemon: Telegram bot + scheduler, always-on
+```
+
+Once `ambi run` is up, the Telegram bot becomes your remote — DM it from your phone, ask for reminders, query memory, run commands. The daemon keeps the SQLite session and scheduled tasks alive across restarts.
+
+### From source
+
+```bash
 git clone https://github.com/leosoft-company/ambi.git
 cd ambi
-uv sync --extra dev --extra hippocamp     # drop --extra hippocamp if you don't want memory
+uv sync --extra dev --extra hippocamp
 cp .env.example .env
-# fill in GEMINI_API_KEY (required) and TELEGRAM_BOT_TOKEN if you want the bot
-
-# REPL — chat in your terminal
-uv run python examples/repl.py
-
-# Telegram bot — adds /ping, /scheduled, persistent session
-uv run python examples/telegram_bot.py
+uv run python examples/repl.py        # or examples/telegram_bot.py
 ```
+
+The `examples/` scripts show the raw library API; the installed `ambi` CLI is the opinionated path.
 
 ### Minimal in-code use
 
