@@ -134,6 +134,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 async def _run_chat() -> int:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.history import FileHistory
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
@@ -151,6 +154,13 @@ async def _run_chat() -> int:
     agent = build_agent(extra_tools=[], with_hippocamp=False, task_store=None)
     await agent.load()
 
+    history_file = paths.ambi_home() / ".chat_history"
+    session = PromptSession(
+        history=FileHistory(str(history_file)),
+        # Multiline pastes arrive atomically thanks to bracketed paste mode
+        # (terminal-emulator feature, detected by prompt_toolkit by default).
+    )
+
     banner = Text()
     banner.append("ambi ", style="bold magenta")
     banner.append(f"v{_get_version()}\n", style="dim")
@@ -167,7 +177,9 @@ async def _run_chat() -> int:
 
     while True:
         try:
-            user_input = console.input("[bold green]❯[/bold green] ").strip()
+            user_input = (
+                await session.prompt_async(HTML("<ansigreen><b>❯ </b></ansigreen>"))
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             return 0
