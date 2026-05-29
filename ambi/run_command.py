@@ -37,7 +37,12 @@ def make_run_command_tool(
     allowlist is strictly read-only.
     """
 
-    async def handler(args: dict) -> str:
+    async def handler(args: dict, progress=None) -> str:
+        if progress is None:
+            async def _noop(_msg: str) -> None:
+                pass
+            progress = _noop
+
         argv = args.get("argv")
         if (
             not isinstance(argv, list)
@@ -79,17 +84,54 @@ def make_run_command_tool(
         except FileNotFoundError:
             return f"Error: command '{argv[0]}' not found on PATH."
 
+        stdout_buf: list[bytes] = []
+        stderr_buf: list[bytes] = []
+
+        # Cap progress emissions so a chatty command (find, grep -r) can't
+        # flood the transport. Beyond the cap we keep collecting output for
+        # the final result but stop emitting per-line progress.
+        emit_count = [0]
+        dropped_count = [0]
+        PROGRESS_CAP = 100
+
+        async def emit_line(text: str) -> None:
+            if emit_count[0] < PROGRESS_CAP:
+                await progress(text)
+                emit_count[0] += 1
+            else:
+                dropped_count[0] += 1
+
+        async def read_stream(stream, buf: list[bytes], prefix: str = "") -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                buf.append(line)
+                text = line.decode("utf-8", errors="replace").rstrip("\n")
+                if text:
+                    await emit_line(f"{prefix}{text}")
+
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_stream(proc.stdout, stdout_buf),
+                    read_stream(proc.stderr, stderr_buf, prefix="stderr: "),
+                    proc.wait(),
+                ),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             return f"Error: command timed out after {timeout}s"
 
-        stdout = _decode_truncate(stdout_b, policy.max_output_bytes)
-        stderr = _decode_truncate(stderr_b, policy.max_output_bytes)
+        if dropped_count[0] > 0:
+            await progress(
+                f"+ {dropped_count[0]} more lines collected (not emitted)"
+            )
+
+        stdout = _decode_truncate(b"".join(stdout_buf), policy.max_output_bytes)
+        stderr = _decode_truncate(b"".join(stderr_buf), policy.max_output_bytes)
         return (
             f"exit_code: {proc.returncode}\n"
             f"--- stdout ---\n{stdout}\n"

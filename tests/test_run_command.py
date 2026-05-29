@@ -118,3 +118,88 @@ async def test_cwd_missing(tmp_path):
     assert "not a directory" in result
 
 
+
+
+# ---------- streaming progress ----------
+
+
+async def test_progress_callback_receives_stdout_lines():
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={Path(PY).name}, default_timeout=10),
+    )
+    progress_msgs: list[str] = []
+
+    async def progress(msg):
+        progress_msgs.append(msg)
+
+    await tool.handler(
+        {
+            "argv": [
+                PY, "-c",
+                "print('one'); print('two'); print('three')",
+            ],
+        },
+        progress=progress,
+    )
+    assert "one" in progress_msgs
+    assert "two" in progress_msgs
+    assert "three" in progress_msgs
+
+
+async def test_progress_cap_caps_emissions_and_reports_dropped():
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={Path(PY).name}, default_timeout=10),
+    )
+    progress_msgs: list[str] = []
+
+    async def progress(msg):
+        progress_msgs.append(msg)
+
+    # 150 lines — cap is 100; expect dropped notification
+    await tool.handler(
+        {
+            "argv": [
+                PY, "-c",
+                "for i in range(150): print(f'line{i}')",
+            ],
+        },
+        progress=progress,
+    )
+    line_msgs = [m for m in progress_msgs if m.startswith("line")]
+    assert len(line_msgs) == 100  # exactly capped
+    dropped = [m for m in progress_msgs if "more lines collected" in m]
+    assert len(dropped) == 1
+    assert "50" in dropped[0]  # 150 - 100 = 50 dropped
+
+
+async def test_stderr_lines_also_stream_with_prefix():
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={Path(PY).name}, default_timeout=10),
+    )
+    progress_msgs: list[str] = []
+
+    async def progress(msg):
+        progress_msgs.append(msg)
+
+    await tool.handler(
+        {
+            "argv": [
+                PY, "-c",
+                "import sys; sys.stderr.write('boom\\n')",
+            ],
+        },
+        progress=progress,
+    )
+    err_lines = [m for m in progress_msgs if m.startswith("stderr:")]
+    assert err_lines
+    assert "boom" in err_lines[0]
+
+
+async def test_handler_works_without_progress_callback():
+    """The chat() path passes no progress — must still work."""
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={Path(PY).name}, default_timeout=10),
+    )
+    result = await tool.handler({"argv": [PY, "-c", "print('hi')"]})
+    assert "exit_code: 0" in result
+    assert "hi" in result
