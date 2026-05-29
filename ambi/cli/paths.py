@@ -30,6 +30,11 @@ def env_file() -> Path:
     return ambi_home() / ".env"
 
 
+def system_md() -> Path:
+    """User-editable system prompt override. Falls back to default if missing."""
+    return ambi_home() / "system.md"
+
+
 def skills_dir() -> Path:
     return ambi_home() / "skills"
 

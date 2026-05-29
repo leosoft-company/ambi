@@ -36,10 +36,39 @@ def test_init_writes_template_and_skills(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert paths.env_file().exists()
     assert "GEMINI_API_KEY=" in paths.env_file().read_text()
+    assert paths.system_md().exists()
+    assert "You are ambi" in paths.system_md().read_text()
     assert (paths.skills_dir() / "time.md").exists()
     assert (paths.skills_dir() / "shell.md").exists()
     out = capsys.readouterr().out
     assert "Created:" in out
+
+
+def test_init_does_not_overwrite_existing_system_md(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMBI_HOME", str(tmp_path / "h"))
+    paths.ensure_tree()
+    paths.system_md().write_text("custom personality")
+    cmd_init(None)
+    assert paths.system_md().read_text() == "custom personality"
+
+
+def test_load_system_prompt_uses_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMBI_HOME", str(tmp_path / "h"))
+    paths.ensure_tree()
+    paths.system_md().write_text("only this matters")
+    from ambi.cli.build import load_system_prompt
+    assert load_system_prompt(with_hippocamp=False) == "only this matters"
+
+
+def test_load_system_prompt_appends_hippocamp_addon(monkeypatch, tmp_path):
+    monkeypatch.setenv("AMBI_HOME", str(tmp_path / "h"))
+    paths.ensure_tree()
+    paths.system_md().write_text("base")
+    from ambi.cli.build import load_system_prompt
+    out = load_system_prompt(with_hippocamp=True)
+    assert out.startswith("base")
+    assert "Memory" in out
+    assert "recall_memory" in out
 
 
 def test_init_is_idempotent(monkeypatch, tmp_path, capsys):

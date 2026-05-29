@@ -100,6 +100,8 @@ def _get_version() -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from .build import SYSTEM_BASE
+
     paths.ensure_tree()
     home = paths.ambi_home()
     env_path = paths.env_file()
@@ -108,6 +110,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not env_path.exists():
         env_path.write_text(_ENV_TEMPLATE)
         made.append(str(env_path))
+
+    system_path = paths.system_md()
+    if not system_path.exists():
+        system_path.write_text(SYSTEM_BASE + "\n")
+        made.append(str(system_path))
 
     skills_dir = paths.skills_dir()
     for name, body in [
@@ -144,15 +151,50 @@ async def _run_chat() -> int:
     from rich.text import Text
 
     from ..env import load_env
+    from ..integrations.hippocamp import hippocamp_server, load_hippocamp_tools
     from ..types import TextBlock, ToolResultBlock, ToolUseBlock
     from .build import build_agent
+
+    from ..scheduler import TaskStore
 
     load_env(paths.env_file())
     paths.ensure_tree()
 
     console = Console()
-    agent = build_agent(extra_tools=[], with_hippocamp=False, task_store=None)
-    await agent.load()
+    # Share the same tasks.db as `ambi run` so schedule() calls from the
+    # REPL persist; the daemon fires them when it's up.
+    task_store = TaskStore(paths.tasks_db())
+    with_hippocamp = os.getenv("AMBI_USE_HIPPOCAMP") == "1"
+
+    async def _build_with_optional_hippocamp():
+        if not with_hippocamp:
+            agent = build_agent(
+                extra_tools=[], with_hippocamp=False, task_store=task_store,
+            )
+            await agent.load()
+            return agent, None
+        cmd_raw = os.getenv("HIPPOCAMP_CMD", "hippocamp-mcp")
+        parts = cmd_raw.split()
+        hippo_cm = hippocamp_server(
+            command=parts[0], args=parts[1:], errlog=paths.hippocamp_log(),
+        )
+        hippo = await hippo_cm.__aenter__()
+        try:
+            hippo_tools = await load_hippocamp_tools(hippo)
+            agent = build_agent(
+                extra_tools=hippo_tools, with_hippocamp=True, task_store=task_store,
+            )
+            await agent.load()
+            return agent, hippo_cm
+        except BaseException:
+            await hippo_cm.__aexit__(None, None, None)
+            raise
+
+    agent, hippo_cm = await _build_with_optional_hippocamp()
+
+    async def _close_hippo():
+        if hippo_cm is not None:
+            await hippo_cm.__aexit__(None, None, None)
 
     history_file = paths.ambi_home() / ".chat_history"
     session = PromptSession(
@@ -175,49 +217,54 @@ async def _run_chat() -> int:
     console.print(Panel(banner, border_style="cyan", padding=(0, 1)))
     console.print()
 
-    while True:
-        try:
-            user_input = (
-                await session.prompt_async(HTML("<ansigreen><b>❯ </b></ansigreen>"))
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return 0
-        if not user_input:
-            continue
-        if user_input.lower() in {"exit", "quit"}:
-            return 0
-        if user_input.lower() == "history":
-            _render_history(console, agent.messages)
-            continue
-        if user_input.lower() == "audit":
-            _render_audit(console, agent)
-            continue
+    try:
+        while True:
+            try:
+                user_input = (
+                    await session.prompt_async(
+                        HTML("<ansigreen><b>❯ </b></ansigreen>")
+                    )
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return 0
+            if not user_input:
+                continue
+            if user_input.lower() in {"exit", "quit"}:
+                return 0
+            if user_input.lower() == "history":
+                _render_history(console, agent.messages)
+                continue
+            if user_input.lower() == "audit":
+                _render_audit(console, agent)
+                continue
 
-        snapshot = len(agent.messages)
-        try:
-            with console.status("[dim]thinking…[/dim]", spinner="dots"):
-                reply = await agent.chat(user_input)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            del agent.messages[snapshot:]
-            console.print("[dim italic](cancelled)[/dim italic]")
-            continue
-        except Exception as e:
-            del agent.messages[snapshot:]
-            console.print(f"[red]error: {type(e).__name__}: {e}[/red]")
-            continue
+            snapshot = len(agent.messages)
+            try:
+                with console.status("[dim]thinking…[/dim]", spinner="dots"):
+                    reply = await agent.chat(user_input)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                del agent.messages[snapshot:]
+                console.print("[dim italic](cancelled)[/dim italic]")
+                continue
+            except Exception as e:
+                del agent.messages[snapshot:]
+                console.print(f"[red]error: {type(e).__name__}: {e}[/red]")
+                continue
 
-        _render_tool_trace(console, agent.messages[snapshot:])
-        console.print(
-            Panel(
-                Markdown(reply),
-                title="[bold magenta]ambi[/bold magenta]",
-                title_align="left",
-                border_style="magenta",
-                padding=(0, 1),
+            _render_tool_trace(console, agent.messages[snapshot:])
+            console.print(
+                Panel(
+                    Markdown(reply),
+                    title="[bold magenta]ambi[/bold magenta]",
+                    title_align="left",
+                    border_style="magenta",
+                    padding=(0, 1),
+                )
             )
-        )
-        console.print()
+            console.print()
+    finally:
+        await _close_hippo()
 
 
 def _render_tool_trace(console, new_messages) -> None:
