@@ -134,46 +134,174 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 async def _run_chat() -> int:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
     from ..env import load_env
-    from ..types import Message, TextBlock
+    from ..types import TextBlock, ToolResultBlock, ToolUseBlock
     from .build import build_agent
 
     load_env(paths.env_file())
     paths.ensure_tree()
+
+    console = Console()
     agent = build_agent(extra_tools=[], with_hippocamp=False, task_store=None)
     await agent.load()
 
-    print(
-        f"ambi REPL — {len(agent.messages)} message(s) loaded from {paths.session_db()}.\n"
-        "Type 'exit' to quit, 'history' to dump messages.\n"
-    )
+    banner = Text()
+    banner.append("ambi ", style="bold magenta")
+    banner.append(f"v{_get_version()}\n", style="dim")
+    banner.append(f"Session: {len(agent.messages)} messages · ", style="dim")
+    banner.append(str(paths.session_db()), style="dim cyan")
+    banner.append("\nCommands: ", style="dim")
+    banner.append("exit", style="dim bold")
+    banner.append(" · ", style="dim")
+    banner.append("history", style="dim bold")
+    banner.append(" · ", style="dim")
+    banner.append("audit", style="dim bold")
+    console.print(Panel(banner, border_style="cyan", padding=(0, 1)))
+    console.print()
+
     while True:
         try:
-            user_input = input("you> ").strip()
+            user_input = console.input("[bold green]❯[/bold green] ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.print()
             return 0
         if not user_input:
             continue
         if user_input.lower() in {"exit", "quit"}:
             return 0
         if user_input.lower() == "history":
-            for i, m in enumerate(agent.messages):
-                print(f"[{i}] {m.role}: {m.content}")
+            _render_history(console, agent.messages)
+            continue
+        if user_input.lower() == "audit":
+            _render_audit(console, agent)
             continue
 
         snapshot = len(agent.messages)
         try:
-            reply = await agent.chat(user_input)
+            with console.status("[dim]thinking…[/dim]", spinner="dots"):
+                reply = await agent.chat(user_input)
         except (KeyboardInterrupt, asyncio.CancelledError):
             del agent.messages[snapshot:]
-            print("\n(cancelled)")
+            console.print("[dim italic](cancelled)[/dim italic]")
             continue
         except Exception as e:
             del agent.messages[snapshot:]
-            print(f"error: {e}")
+            console.print(f"[red]error: {type(e).__name__}: {e}[/red]")
             continue
-        print(f"ambi> {reply}\n")
+
+        _render_tool_trace(console, agent.messages[snapshot:])
+        console.print(
+            Panel(
+                Markdown(reply),
+                title="[bold magenta]ambi[/bold magenta]",
+                title_align="left",
+                border_style="magenta",
+                padding=(0, 1),
+            )
+        )
+        console.print()
+
+
+def _render_tool_trace(console, new_messages) -> None:
+    """Show a one-line summary of any tools called in this turn."""
+    from ..types import ToolResultBlock, ToolUseBlock
+
+    lines = []
+    for m in new_messages:
+        if m.role != "assistant":
+            continue
+        for b in m.content:
+            if isinstance(b, ToolUseBlock):
+                args_preview = _short_args(b.input)
+                lines.append(f"  ↳ {b.name}({args_preview})")
+    if not lines:
+        return
+    from rich.text import Text
+    trace = Text("\n".join(lines), style="dim cyan")
+    console.print(trace)
+
+
+def _short_args(d: dict, limit: int = 60) -> str:
+    if not d:
+        return ""
+    import json
+    raw = json.dumps(d, ensure_ascii=False, default=str)
+    if len(raw) > limit:
+        raw = raw[: limit - 1] + "…"
+    return raw
+
+
+def _render_history(console, messages) -> None:
+    from rich.table import Table
+
+    if not messages:
+        console.print("[dim](no messages yet)[/dim]")
+        return
+    table = Table(
+        title=f"Session history · {len(messages)} message(s)",
+        show_lines=False,
+        header_style="bold cyan",
+        title_style="bold",
+    )
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Role", style="cyan", width=10)
+    table.add_column("Content")
+    for i, m in enumerate(messages):
+        table.add_row(str(i), m.role, _summarize_blocks(m.content))
+    console.print(table)
+
+
+def _summarize_blocks(content) -> str:
+    from ..types import TextBlock, ToolResultBlock, ToolUseBlock
+
+    parts: list[str] = []
+    for b in content:
+        if isinstance(b, TextBlock):
+            text = b.text.replace("\n", " ")
+            parts.append(text[:140] + ("…" if len(text) > 140 else ""))
+        elif isinstance(b, ToolUseBlock):
+            parts.append(f"[cyan]→ {b.name}({_short_args(b.input, 40)})[/cyan]")
+        elif isinstance(b, ToolResultBlock):
+            tag = "[red]ERROR[/red]" if b.is_error else "[green]ok[/green]"
+            c = b.content if isinstance(b.content, str) else str(b.content)
+            c = c.replace("\n", " ")
+            parts.append(f"{tag} {c[:120]}{'…' if len(c) > 120 else ''}")
+    return " · ".join(parts) if parts else ""
+
+
+def _render_audit(console, agent) -> None:
+    from rich.table import Table
+
+    gate = getattr(agent, "sensegate", None)
+    if gate is None or not gate.audit_log:
+        console.print("[dim](no audit entries)[/dim]")
+        return
+    table = Table(
+        title=f"SenseGate audit · {len(gate.audit_log)} flag(s)",
+        header_style="bold cyan",
+        title_style="bold yellow",
+    )
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Time", style="dim", width=10)
+    table.add_column("Kind", width=6)
+    table.add_column("Reason")
+    table.add_column("Claim")
+    for i, e in enumerate(gate.audit_log):
+        kind = "[red]WRITE[/red]" if e.had_write else "[yellow]READ[/yellow]"
+        table.add_row(
+            str(i),
+            e.timestamp.strftime("%H:%M:%S"),
+            kind,
+            (e.reason[:80] + "…") if len(e.reason) > 80 else e.reason,
+            e.final_text_excerpt[:80] + ("…" if len(e.final_text_excerpt) > 80 else ""),
+        )
+    console.print(table)
 
 
 async def _run_daemon() -> int:
