@@ -50,6 +50,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ambi"]
+include = ["ambi/cli/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
