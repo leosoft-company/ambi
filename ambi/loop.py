@@ -7,6 +7,7 @@ from .sensegate import SenseGate, ToolInvocation, correction_message
 from .skills import SkillRegistry, assemble_system, make_load_skill_tool
 from .store import SqliteStore
 from .tool import ToolRegistry
+from .warden import PolicyContext, Warden
 from .types import (
     AgentEvent,
     Block,
@@ -65,6 +66,7 @@ class Agent:
         context_window_turns: int = 5,
         max_block_chars: int | None = 8000,
         compaction_threshold: int = 0,
+        warden: Warden | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -76,6 +78,7 @@ class Agent:
         self.context_window_turns = context_window_turns
         self.max_block_chars = max_block_chars
         self.compaction_threshold = compaction_threshold
+        self.warden = warden
         if skills is not None:
             tools.register(make_load_skill_tool(skills))
         self.system = assemble_system(system, skills)
@@ -485,6 +488,28 @@ class Agent:
         call: ToolUseBlock,
         progress=None,
     ) -> ToolResultBlock:
+        # Pre-execution authorization: ask the Warden whether this call
+        # may proceed. Denial becomes an error tool_result so the model
+        # sees it and can respond honestly to the user.
+        if self.warden is not None:
+            decision = await self.warden.authorize(
+                PolicyContext(
+                    tool_name=call.name,
+                    tool_input=call.input,
+                    session_id=self.session_id,
+                )
+            )
+            if decision.verdict == "deny":
+                return ToolResultBlock(
+                    tool_use_id="",
+                    content=(
+                        f"Denied by policy '{decision.policy_name}': "
+                        f"{decision.reason}"
+                    ),
+                    is_error=True,
+                    _tool_name=call.name,
+                )
+
         try:
             return await asyncio.wait_for(
                 self.tools.invoke(call.name, call.input, progress=progress),

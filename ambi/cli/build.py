@@ -154,6 +154,27 @@ def build_agent(
 
     compaction_threshold = int(os.getenv("AMBI_COMPACTION_THRESHOLD", "15"))
 
+    # Warden: pre-execution policy enforcement. Defaults are conservative:
+    #   - ArgvValidator blocks the truly destructive run_command argv shapes.
+    #   - CostCeiling caps daily spend (uses the same UsageStore we already
+    #     wired for token tracking).
+    # No QuietHoursPolicy by default — opt in via env if you want it.
+    from ..warden import ArgvValidatorPolicy, CostCeilingPolicy, Warden
+    warden = Warden(policies=[
+        ArgvValidatorPolicy(forbid=[
+            "git push --force",
+            "git push -f",
+            "git reset --hard origin",
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf $HOME",
+        ]),
+        CostCeilingPolicy(
+            usage_store=usage_store,
+            daily_usd=float(os.getenv("AMBI_DAILY_COST_USD", "1.00")),
+        ),
+    ])
+
     return Agent(
         provider=provider,
         tools=tools,
@@ -162,4 +183,5 @@ def build_agent(
         sensegate=gate,
         store=SqliteStore(paths.session_db()),
         compaction_threshold=compaction_threshold,
+        warden=warden,
     )

@@ -995,3 +995,80 @@ async def test_chat_path_ignores_progress_callbacks():
     # The result block should have the tool's final return value.
     res = agent.messages[2].content[0]
     assert res.content == "ok"
+
+
+# ---------- Warden integration ----------
+
+
+async def test_warden_denial_becomes_error_tool_result():
+    """A Warden deny verdict should produce an error ToolResultBlock that
+    the agent can see and respond to, without invoking the handler."""
+    from ambi.warden import ArgvValidatorPolicy, Warden
+
+    tools = ToolRegistry()
+    invocations = []
+
+    async def fake_run(args):
+        invocations.append(args)
+        return "ran"
+
+    tools.register(_tool("run_command", fake_run, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command",
+                input={"argv": ["git", "push", "--force"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(
+            content=[TextBlock("can't do that")],
+            stop_reason="end_turn",
+        ),
+    ])
+    warden = Warden(policies=[ArgvValidatorPolicy(forbid=["push --force"])])
+    agent = Agent(
+        provider=provider, tools=tools, system="s", warden=warden,
+    )
+    text = await agent.chat("force push please")
+
+    assert text == "can't do that"
+    # Handler must NOT have run.
+    assert invocations == []
+    # The recorded tool_result should be the policy denial.
+    res = agent.messages[2].content[0]
+    assert isinstance(res, ToolResultBlock)
+    assert res.is_error
+    assert "Denied by policy" in res.content
+    assert "argv_validator" in res.content
+
+
+async def test_warden_audit_log_records_each_authorization():
+    from ambi.warden import ArgvValidatorPolicy, Warden
+
+    tools = ToolRegistry()
+
+    async def noop(args):
+        return "ok"
+
+    tools.register(_tool("run_command", noop, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command",
+                input={"argv": ["ls"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("done")], stop_reason="end_turn"),
+    ])
+    warden = Warden(policies=[ArgvValidatorPolicy(forbid=["rm -rf"])])
+    agent = Agent(
+        provider=provider, tools=tools, system="s", warden=warden,
+    )
+    await agent.chat("ls please")
+    assert len(warden.audit_log) == 1
+    assert warden.audit_log[0].verdict == "allow"
+    assert warden.audit_log[0].tool_name == "run_command"
