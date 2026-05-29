@@ -1,4 +1,4 @@
-# ambi-core
+# ambi
 
 > **ambi** — *ambient memory-backed intelligence*. A personal-agent harness that runs always-on, remembers via [Hippocamp](https://github.com/leosoft-company/hippocamp), and verifies what it does.
 
