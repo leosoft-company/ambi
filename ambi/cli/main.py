@@ -65,6 +65,11 @@ AMBI_VERIFY_READS=0
 # === Model selection ===
 # AMBI_MODEL=gemini-2.5-flash
 
+# === Compaction ===
+# Once this many user-text turns accumulate beyond the verbatim window,
+# they get summarized into a single anchor for long-term recall. 0 = off.
+# AMBI_COMPACTION_THRESHOLD=15
+
 # === run_command allowlist ===
 # Comma-separated. Override default if you want a different set.
 # AMBI_RUN_COMMAND_ALLOW=ls,cat,grep,git

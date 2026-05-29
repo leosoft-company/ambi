@@ -9,6 +9,7 @@ from ambi.store import SqliteStore
 from ambi.tool import Tool, ToolKind, ToolRegistry
 from ambi.types import (
     ChatComplete,
+    CompactionAnchor,
     CompletionResult,
     Message,
     StreamEnd,
@@ -779,3 +780,111 @@ async def test_chat_stream_persists_on_success(tmp_path):
     )
     await fresh.load()
     assert len(fresh.messages) == 2
+
+
+# ---------- compaction ----------
+
+
+async def test_compaction_disabled_by_default():
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("ok")], stop_reason="end_turn")]
+    )
+    agent = Agent(provider=provider, tools=ToolRegistry(), system="s")
+    assert agent.compaction_threshold == 0
+    assert agent._next_compaction_range() is None
+
+
+async def test_compaction_triggers_when_threshold_reached():
+    """With threshold=3 and window=2, an extra 4 turns past the window should fire."""
+    provider = MockProvider(
+        [
+            CompletionResult(content=[TextBlock("r")], stop_reason="end_turn")
+            for _ in range(6)
+        ]
+        + [CompletionResult(content=[TextBlock("summary text")], stop_reason="end_turn")]
+    )
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        context_window_turns=2,
+        compaction_threshold=3,
+    )
+    for i in range(6):
+        await agent.chat(f"turn {i}")
+    # Compaction is fire-and-forget; await it once.
+    await agent._compact()
+    assert len(agent.anchors) == 1
+    a = agent.anchors[0]
+    # Should cover at least the first 3 user-text turns (and the assistant
+    # messages between them).
+    assert a.from_seq == 0
+    assert a.to_seq >= 5  # 3 user + 3 assistant minimum
+
+
+async def test_context_view_folds_anchor_in():
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("ok")], stop_reason="end_turn")]
+    )
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        context_window_turns=2,
+        compaction_threshold=0,  # we'll inject the anchor manually
+    )
+    # 8 messages: 4 user, 4 assistant — but we'll insert an anchor over 0..3
+    for i in range(4):
+        agent.messages.append(Message("user", [TextBlock(f"u{i}")]))
+        agent.messages.append(Message("assistant", [TextBlock(f"a{i}")]))
+    agent.anchors.append(
+        CompactionAnchor(from_seq=0, to_seq=3, summary="early bits")
+    )
+
+    view = agent._context_view()
+    # First message in view: the synthetic anchor summary
+    first = view[0]
+    assert "early bits" in first.content[0].text
+    # Then the verbatim window of the last 2 user-text turns (u2, a2, u3, a3)
+    rest_texts = [
+        m.content[0].text for m in view[1:]
+        if isinstance(m.content[0], TextBlock)
+    ]
+    assert "u2" in rest_texts
+    assert "u3" in rest_texts
+    # The covered messages u0, u1 should NOT appear verbatim
+    assert "u0" not in rest_texts
+    assert "u1" not in rest_texts
+    # Original messages are untouched (non-destructive)
+    assert len(agent.messages) == 8
+
+
+async def test_anchor_persists_to_store_and_reloads(tmp_path):
+    from ambi.store import SqliteStore
+
+    db = tmp_path / "session.db"
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("ok")], stop_reason="end_turn")] * 5
+        + [CompletionResult(content=[TextBlock("summary")], stop_reason="end_turn")]
+    )
+    a1 = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        store=SqliteStore(db),
+        context_window_turns=1,
+        compaction_threshold=2,
+    )
+    await a1.load()
+    for i in range(3):
+        await a1.chat(f"t{i}")
+    await a1._compact()
+    assert len(a1.anchors) == 1
+    original_anchor = a1.anchors[0]
+
+    # Fresh agent reads the persisted anchor from the store.
+    a2 = Agent(
+        provider=MockProvider([]), tools=ToolRegistry(), system="s",
+        store=SqliteStore(db),
+        context_window_turns=1,
+        compaction_threshold=2,
+    )
+    await a2.load()
+    assert len(a2.anchors) == 1
+    assert a2.anchors[0].from_seq == original_anchor.from_seq
+    assert a2.anchors[0].to_seq == original_anchor.to_seq
+    assert a2.anchors[0].summary == original_anchor.summary

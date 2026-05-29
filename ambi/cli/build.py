@@ -147,6 +147,8 @@ def build_agent(
 
     system = load_system_prompt(with_hippocamp=with_hippocamp)
 
+    compaction_threshold = int(os.getenv("AMBI_COMPACTION_THRESHOLD", "15"))
+
     return Agent(
         provider=provider,
         tools=tools,
@@ -154,4 +156,5 @@ def build_agent(
         skills=skills,
         sensegate=gate,
         store=SqliteStore(paths.session_db()),
+        compaction_threshold=compaction_threshold,
     )

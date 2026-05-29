@@ -16,7 +16,14 @@ from pathlib import Path
 
 import aiosqlite
 
-from .types import Block, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from .types import (
+    Block,
+    CompactionAnchor,
+    Message,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 
 _SCHEMA = """
@@ -29,6 +36,16 @@ CREATE TABLE IF NOT EXISTS messages (
     PRIMARY KEY (session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
+
+CREATE TABLE IF NOT EXISTS compaction_anchors (
+    session_id TEXT NOT NULL DEFAULT 'default',
+    from_seq   INTEGER NOT NULL,
+    to_seq     INTEGER NOT NULL,
+    summary    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (session_id, from_seq, to_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_anchors_session ON compaction_anchors(session_id, from_seq);
 """
 
 
@@ -92,7 +109,44 @@ class SqliteStore:
             await db.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,),
             )
+            await db.execute(
+                "DELETE FROM compaction_anchors WHERE session_id = ?",
+                (session_id,),
+            )
             await db.commit()
+
+    # ----- compaction anchors -----
+
+    async def save_anchor(
+        self, anchor: CompactionAnchor, session_id: str = "default"
+    ) -> None:
+        await self._ensure()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO compaction_anchors "
+                "(session_id, from_seq, to_seq, summary) VALUES (?, ?, ?, ?)",
+                (session_id, anchor.from_seq, anchor.to_seq, anchor.summary),
+            )
+            await db.commit()
+
+    async def load_anchors(
+        self, session_id: str = "default"
+    ) -> list[CompactionAnchor]:
+        await self._ensure()
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT from_seq, to_seq, summary, created_at "
+                "FROM compaction_anchors WHERE session_id = ? "
+                "ORDER BY from_seq ASC",
+                (session_id,),
+            )
+            rows = await cur.fetchall()
+        return [
+            CompactionAnchor(
+                from_seq=r[0], to_seq=r[1], summary=r[2], created_at=r[3] or "",
+            )
+            for r in rows
+        ]
 
 
 # ---------------------------------------------------------------------------

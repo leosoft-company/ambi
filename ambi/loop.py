@@ -11,6 +11,7 @@ from .types import (
     AgentEvent,
     Block,
     ChatComplete,
+    CompactionAnchor,
     Message,
     SenseGateFlagEvent,
     StreamEnd,
@@ -62,6 +63,7 @@ class Agent:
         session_id: str = "default",
         context_window_turns: int = 5,
         max_block_chars: int | None = 8000,
+        compaction_threshold: int = 0,
     ):
         self.provider = provider
         self.tools = tools
@@ -72,23 +74,29 @@ class Agent:
         self.session_id = session_id
         self.context_window_turns = context_window_turns
         self.max_block_chars = max_block_chars
+        self.compaction_threshold = compaction_threshold
         if skills is not None:
             tools.register(make_load_skill_tool(skills))
         self.system = assemble_system(system, skills)
         self.messages: list[Message] = []
+        self.anchors: list[CompactionAnchor] = []
         self._persisted_count = 0
         self._chat_lock = asyncio.Lock()
+        self._compaction_lock = asyncio.Lock()
 
     async def load(self) -> None:
-        """Load persisted messages from the store. No-op if no store."""
+        """Load persisted messages + compaction anchors. No-op if no store."""
         if self.store is None:
             return
         self.messages = await self.store.load(self.session_id)
         self._persisted_count = len(self.messages)
+        self.anchors = await self.store.load_anchors(self.session_id)
 
     async def chat(self, user_input: str, max_turns: int = 20) -> str:
         async with self._chat_lock:
-            return await self._chat_locked(user_input, max_turns)
+            text = await self._chat_locked(user_input, max_turns)
+        await self._maybe_compact_in_background()
+        return text
 
     async def _chat_locked(self, user_input: str, max_turns: int) -> str:
         snapshot = len(self.messages)
@@ -161,6 +169,7 @@ class Agent:
         async with self._chat_lock:
             async for ev in self._chat_stream_locked(user_input, max_turns):
                 yield ev
+        await self._maybe_compact_in_background()
 
     async def _chat_stream_locked(
         self, user_input: str, max_turns: int
@@ -260,23 +269,48 @@ class Agent:
         self._persisted_count = len(self.messages)
 
     def _context_view(self) -> list[Message]:
-        """Return the trimmed/clipped slice of messages sent to the provider.
+        """Return the slice of messages sent to the provider.
 
-        Walks backward from the end of self.messages, counting "user-text"
-        turns (user messages whose first block is a TextBlock — i.e. real
-        inputs, not tool_result wrappers). Slices from the Nth such turn
-        forward, then clips any oversize block in the resulting copy.
+        Anchors (if any) get folded in as synthetic user messages summarizing
+        their covered range. Verbatim window covers the last N user-text
+        turns that aren't covered by an anchor. Long blocks are clipped on a
+        copy — original storage is never mutated.
         """
-        cutoff = self._find_window_cutoff()
-        window = self.messages[cutoff:]
-        if self.max_block_chars is None:
-            return window
-        return [self._clip_message(m) for m in window]
+        covered: set[int] = set()
+        for a in self.anchors:
+            for seq in range(a.from_seq, a.to_seq + 1):
+                covered.add(seq)
 
-    def _find_window_cutoff(self) -> int:
+        cutoff = self._find_window_cutoff(covered)
+
+        out: list[Message] = []
+        for a in sorted(self.anchors, key=lambda x: x.from_seq):
+            out.append(
+                Message(
+                    "user",
+                    [TextBlock(
+                        f"[Earlier conversation, compacted summary of "
+                        f"messages {a.from_seq}..{a.to_seq}]: {a.summary}"
+                    )],
+                )
+            )
+        for i in range(cutoff, len(self.messages)):
+            if i in covered:
+                continue
+            out.append(self.messages[i])
+
+        if self.max_block_chars is None:
+            return out
+        return [self._clip_message(m) for m in out]
+
+    def _find_window_cutoff(self, covered: set[int] | None = None) -> int:
+        """Index of the Nth-most-recent user-text turn, ignoring covered seqs."""
         target = max(1, self.context_window_turns)
+        skip = covered or set()
         count = 0
         for i in range(len(self.messages) - 1, -1, -1):
+            if i in skip:
+                continue
             m = self.messages[i]
             if (
                 m.role == "user"
@@ -309,6 +343,90 @@ class Agent:
             )
         return b
 
+    # ---------- compaction ----------
+
+    def _next_compaction_range(self) -> tuple[int, int] | None:
+        """Return (from_seq, to_seq) for the next batch to compact, or None."""
+        if self.compaction_threshold <= 0:
+            return None
+
+        covered: set[int] = set()
+        for a in self.anchors:
+            for seq in range(a.from_seq, a.to_seq + 1):
+                covered.add(seq)
+
+        window_cutoff = self._find_window_cutoff(covered)
+
+        # Collect indices that are: not in window (i.e. < cutoff) AND uncovered.
+        out_of_window_uncovered: list[int] = [
+            i for i in range(window_cutoff)
+            if i not in covered
+        ]
+
+        # Count user-text turns among them. Trigger when >= threshold.
+        user_turn_indices = [
+            i for i in out_of_window_uncovered
+            if (
+                self.messages[i].role == "user"
+                and self.messages[i].content
+                and isinstance(self.messages[i].content[0], TextBlock)
+            )
+        ]
+        if len(user_turn_indices) < self.compaction_threshold:
+            return None
+
+        # Compact a single batch from the oldest uncovered indices forward.
+        # Range is contiguous on the storage side: from the first uncovered
+        # message to the message just before the (threshold+1)-th user-text
+        # turn, so each anchor wraps a clean group of conversational turns.
+        from_seq = out_of_window_uncovered[0]
+        boundary_user_idx = user_turn_indices[self.compaction_threshold] \
+            if len(user_turn_indices) > self.compaction_threshold \
+            else None
+        to_seq = (boundary_user_idx - 1) if boundary_user_idx is not None \
+            else out_of_window_uncovered[-1]
+        return from_seq, to_seq
+
+    async def _maybe_compact_in_background(self) -> None:
+        if self._next_compaction_range() is None:
+            return
+        asyncio.create_task(self._compact())
+
+    async def _compact(self) -> None:
+        async with self._compaction_lock:
+            range_ = self._next_compaction_range()
+            if range_ is None:
+                return
+            from_seq, to_seq = range_
+            segment = self.messages[from_seq : to_seq + 1]
+            try:
+                summary = await self._summarize_segment(segment)
+            except Exception:
+                return  # leave for next attempt; never crash the chat path
+            anchor = CompactionAnchor(
+                from_seq=from_seq, to_seq=to_seq, summary=summary,
+            )
+            self.anchors.append(anchor)
+            if self.store is not None:
+                try:
+                    await self.store.save_anchor(anchor, self.session_id)
+                except Exception:
+                    pass  # in-memory anchor still works for this process
+
+    async def _summarize_segment(self, segment: list[Message]) -> str:
+        prompt = _build_compaction_prompt(segment)
+        result = await self.provider.complete(
+            messages=[Message("user", [TextBlock(prompt)])],
+            tools=[],
+            system=(
+                "You compress conversation segments for long-term agent "
+                "recall. Be terse, factual, third-person. One short "
+                "paragraph; no headers, no bullet lists."
+            ),
+            max_tokens=512,
+        )
+        return _final_text(result.content).strip()
+
     async def _invoke_with_timeout(self, call: ToolUseBlock) -> ToolResultBlock:
         try:
             return await asyncio.wait_for(
@@ -326,3 +444,27 @@ class Agent:
 
 def _final_text(content: list[Block]) -> str:
     return "\n".join(b.text for b in content if isinstance(b, TextBlock))
+
+
+def _build_compaction_prompt(segment: list[Message]) -> str:
+    """Format a segment of session history for the compaction LLM call."""
+    lines: list[str] = []
+    for m in segment:
+        for b in m.content:
+            if isinstance(b, TextBlock):
+                lines.append(f"{m.role}: {b.text}")
+            elif isinstance(b, ToolUseBlock):
+                lines.append(f"{m.role}: [tool call] {b.name}({b.input!r})")
+            elif isinstance(b, ToolResultBlock):
+                tag = "ERROR" if b.is_error else "ok"
+                content = b.content if isinstance(b.content, str) else str(b.content)
+                lines.append(f"{m.role}: [tool result {b._tool_name} {tag}] {content[:400]}")
+    body = "\n".join(lines)
+    return (
+        "Summarize the following conversation segment as a single short "
+        "paragraph for the agent's long-term recall.\n\n"
+        "Preserve: stable facts the user shared, decisions or commitments, "
+        "tool calls and their outcomes (success/failure, IDs), open threads.\n"
+        "Drop: pleasantries, exact phrasing, already-resolved questions.\n\n"
+        f"--- segment ---\n{body}\n--- end ---"
+    )

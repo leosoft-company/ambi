@@ -117,3 +117,23 @@ class ChatComplete:
 AgentEvent = (
     TextDelta | ToolUseEvent | ToolResultEvent | SenseGateFlagEvent | ChatComplete
 )
+
+
+# ---------------------------------------------------------------------------
+# Compaction
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompactionAnchor:
+    """One compacted segment of session history.
+
+    Covers messages[from_seq..to_seq] inclusive — those raw messages stay
+    on disk for audit/replay; the anchor's summary is what the LLM sees
+    for that range in subsequent turns.
+    """
+
+    from_seq: int
+    to_seq: int
+    summary: str
+    created_at: str = ""
