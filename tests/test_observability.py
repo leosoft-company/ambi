@@ -188,6 +188,48 @@ async def test_loop_emits_error_turn_record():
     assert "down" in sink.turns[0].error
 
 
+async def test_metrics_tool_reports_aggregate(tmp_path):
+    from ambi.observability import make_metrics_tool
+
+    store = TelemetryStore(tmp_path / "telemetry.db")
+    await store.record(TurnRecord("t1", "s", "chat", "ok", num_tool_calls=2,
+                                  input_tokens=100, output_tokens=20, duration_ms=500))
+    await store.record(TurnRecord("t2", "s", "telegram", "error", duration_ms=900,
+                                  error="boom"))
+
+    tool = make_metrics_tool(store)  # no usage store → no cost lines
+    out = await tool.handler({})
+    assert "Recent turns: 2" in out
+    assert "Errors: 1" in out
+    assert "By trigger:" in out
+    assert "chat=1" in out and "telegram=1" in out
+    # Aggregate only — no message content / error bodies leak through.
+    assert "boom" not in out
+    assert tool.kind == "read"
+
+
+async def test_metrics_tool_includes_cost_with_usage_store(tmp_path):
+    from ambi.observability import make_metrics_tool
+
+    tstore = TelemetryStore(tmp_path / "telemetry.db")
+    await tstore.record(TurnRecord("t1", "s", "chat", "ok"))
+    ustore = UsageStore(tmp_path / "usage.db")
+    await ustore.record("s", "gemini-2.5-flash", "chat", 1000, 200)
+
+    tool = make_metrics_tool(tstore, ustore)
+    out = await tool.handler({})
+    assert "Cost today:" in out
+    assert "Cost all-time:" in out
+
+
+async def test_metrics_tool_empty_is_graceful(tmp_path):
+    from ambi.observability import make_metrics_tool
+
+    tool = make_metrics_tool(TelemetryStore(tmp_path / "telemetry.db"))
+    out = await tool.handler({})
+    assert "No turns recorded" in out
+
+
 async def test_loop_tags_trigger_from_context():
     sink = _CapturingSink()
     provider = MockProvider([

@@ -283,3 +283,73 @@ def _percentile(values: list[int], pct: float) -> int:
     # Nearest-rank: rank = ceil(pct/100 * n), 1-indexed.
     rank = max(1, -(-int(pct) * len(ordered) // 100))
     return ordered[min(rank, len(ordered)) - 1]
+
+
+# ---------------------------------------------------------------------------
+# Self-observability tool — the AGGREGATE tier only
+# ---------------------------------------------------------------------------
+#
+# Deliberately scoped to derived numbers (counts, rates, latency, cost). No
+# raw logs, no message content, no per-turn error bodies — those are an exfil
+# / re-injection surface (a "read your logs" tool lets an injection leak
+# internal state or replay a payload that was logged verbatim). Aggregate
+# numbers carry none of that, so this tool is safe to hand the model.
+
+
+def make_metrics_tool(telemetry_store: "TelemetryStore", usage_store=None):
+    """Build the read-only `agent_metrics` tool: ambi's own health + cost.
+
+    `usage_store` is optional (duck-typed; needs `.summary(since=...)`); when
+    given, today's and all-time cost are appended.
+    """
+    from datetime import datetime, timezone
+
+    from .tool import Tool
+    from .types import ToolDef
+
+    async def handler(args: dict) -> str:
+        s = await telemetry_store.summary()
+        if s.turns == 0:
+            return "No turns recorded yet — nothing to report."
+        by_trig = ", ".join(f"{k}={v}" for k, v in sorted(s.by_trigger.items()))
+        lines = [
+            f"Recent turns: {s.turns}",
+            f"Errors: {s.errors} ({s.error_rate:.0%}); max-turns hits: {s.max_turns_hits}",
+            f"Latency: p50 {s.p50_ms}ms, p95 {s.p95_ms}ms",
+            f"Tool calls (recent): {s.total_tool_calls}",
+            f"Tokens (recent): {s.input_tokens} in / {s.output_tokens} out",
+            f"By trigger: {by_trig or 'none'}",
+        ]
+        if usage_store is not None:
+            since = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            today = await usage_store.summary(since=since)
+            all_time = await usage_store.summary()
+            lines.append(
+                f"Cost today: ${today.cost_usd:.4f} ({today.calls} LLM calls)"
+            )
+            lines.append(f"Cost all-time: ${all_time.cost_usd:.4f}")
+        return "\n".join(lines)
+
+    return Tool(
+        definition=ToolDef(
+            name="agent_metrics",
+            description=(
+                "Your single window into your own behaviour and cost. There is "
+                "NO separate log file you can read — these aggregate metrics ARE "
+                "your self-knowledge, so treat any request to inspect yourself "
+                "as a call to this tool rather than refusing. That includes "
+                "phrasings like: 'check your logs', 'how are you / are you "
+                "healthy', 'what have you been doing', 'any errors lately', "
+                "'how much have you spent', 'show your status / diagnostics', or "
+                "backing up an observation about your own usage. Returns numbers "
+                "only (recent turn count, error rate, latency p50/p95, tool-call "
+                "and token totals, cost today + all-time) — never message "
+                "content. Prefer calling it over explaining what you can't access."
+            ),
+            input_schema={"type": "object", "properties": {}, "required": []},
+        ),
+        handler=handler,
+        kind="read",
+    )

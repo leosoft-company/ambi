@@ -218,8 +218,12 @@ def build_agent(
     main_max_tokens = int(os.getenv("AMBI_MAX_TOKENS", "16384"))
     main_thinking_budget = int(os.getenv("AMBI_THINKING_BUDGET", "4096"))
 
-    from ..observability import TelemetryStore
+    from ..observability import TelemetryStore, make_metrics_tool
     telemetry = TelemetryStore(paths.telemetry_db())
+    # Self-observability: let the agent report its own aggregate health + cost
+    # (numbers only — no logs / message content). Powers the "observant
+    # colleague" persona and natural-language cost/health questions.
+    tools.register(make_metrics_tool(telemetry, usage_store))
 
     return Agent(
         provider=provider,

@@ -1,0 +1,14 @@
+name: self_metrics_intent
+description: |
+  Indirect introspection requests must reach agent_metrics, not a refusal.
+  Regression target: "check your logs" used to make the agent explain it has
+  no log access instead of calling agent_metrics (it matched the tool's
+  keyword-y description on "are you healthy?" but nothing else). The fix is an
+  intent-oriented tool description + a system-prompt nudge to read intent, not
+  exact words.
+input: "check your logs"
+assert:
+  - tool_called: agent_metrics
+  # No wordy "I can't access my logs" disclaimer.
+  - text_not_matches: "(?i)(don't|do not|can't|cannot|no) (direct )?access"
+  - text_not_matches: "(?i)i don't have access"
