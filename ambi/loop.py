@@ -1,6 +1,6 @@
 import asyncio
 
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from .provider import LLMProvider
 from .sensegate import SenseGate, ToolInvocation, correction_message
@@ -69,6 +69,7 @@ class Agent:
         warden: Warden | None = None,
         max_tokens: int = 4096,
         provider_kwargs: dict | None = None,
+        system_suffix_fn: Callable[[], str] | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -85,12 +86,25 @@ class Agent:
         self.provider_kwargs = provider_kwargs or {}
         if skills is not None:
             tools.register(make_load_skill_tool(skills))
-        self.system = assemble_system(system, skills)
+        self._system_base = assemble_system(system, skills)
+        self._system_suffix_fn = system_suffix_fn
         self.messages: list[Message] = []
         self.anchors: list[CompactionAnchor] = []
         self._persisted_count = 0
         self._chat_lock = asyncio.Lock()
         self._compaction_lock = asyncio.Lock()
+
+    @property
+    def system(self) -> str:
+        if self._system_suffix_fn is None:
+            return self._system_base
+        try:
+            suffix = self._system_suffix_fn()
+        except Exception:
+            return self._system_base
+        if not suffix:
+            return self._system_base
+        return f"{self._system_base}\n\n{suffix}"
 
     async def load(self) -> None:
         """Load persisted messages + compaction anchors. No-op if no store."""

@@ -71,6 +71,14 @@ async def _get_current_time(args: dict) -> str:
     return datetime.now(tz).strftime("%A %Y-%m-%d %H:%M:%S %Z")
 
 
+def _system_time_suffix() -> str:
+    """Fresh per-turn timestamp appended to the system prompt so the model
+    always knows the current local time (e.g. for time-of-day greetings).
+    """
+    now = datetime.now().astimezone()
+    return f"Current local time: {now.strftime('%A %Y-%m-%d %H:%M %Z')}"
+
+
 def _time_tool() -> Tool:
     return Tool(
         definition=ToolDef(
@@ -199,4 +207,5 @@ def build_agent(
                 thinking_budget=main_thinking_budget,
             ),
         },
+        system_suffix_fn=_system_time_suffix,
     )
