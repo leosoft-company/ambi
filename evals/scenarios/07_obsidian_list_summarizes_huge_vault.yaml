@@ -1,0 +1,27 @@
+name: obsidian_list_summarizes_huge_vault
+description: |
+  Regression target: 'show me a list of notes' in a vault with hundreds
+  of paths used to return all paths as a single huge string. That blob
+  overflowed the agent's max_block_chars on subsequent turns; the model
+  reported '[clipped]' and told the user it couldn't retrieve the list.
+
+  Fix in ambi/skills/obsidian/tools.py: when >100 notes are in scope,
+  obsidian_list returns a folder breakdown instead of every path.
+
+  This scenario seeds a 150-note tmp vault and asserts the summary form.
+setup:
+  env:
+    OBSIDIAN_VAULT: "{tmp_dir}/vault"
+  prepare:
+    - create_obsidian_notes:
+        count: 150
+        folders: [Inbox, Areas/Work, Resources/Reading]
+input: "show me a list of notes in my obsidian vault"
+assert:
+  - tool_called: obsidian_list
+  # The summary marker — folder breakdown not full path list.
+  - text_contains: "too many to list"
+  # No "[clipped]" / "cannot retrieve" symptom.
+  - text_not_matches: "(?i)clipped|cannot retrieve|truncated"
+  # Mention at least one of the seeded folders so we know it scanned.
+  - text_matches: "Inbox|Areas|Resources"

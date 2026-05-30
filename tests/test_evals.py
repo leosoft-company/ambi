@@ -212,3 +212,146 @@ def test_scenario_result_fails_on_error_even_if_all_assertions_pass():
         assertion_results=[],
     )
     assert not r.passed
+
+
+# ---------- setup block ----------
+
+
+def test_load_scenario_with_setup(tmp_path):
+    f = tmp_path / "x.yaml"
+    f.write_text(
+        "input: hi\n"
+        "setup:\n"
+        "  env:\n"
+        "    FOO: bar\n"
+        "  prepare:\n"
+        "    - create_obsidian_notes:\n"
+        "        count: 10\n"
+    )
+    [scen] = load_scenarios(tmp_path)
+    assert scen.setup["env"] == {"FOO": "bar"}
+    assert scen.setup["prepare"][0] == {"create_obsidian_notes": {"count": 10}}
+
+
+def test_load_rejects_non_dict_setup(tmp_path):
+    f = tmp_path / "x.yaml"
+    f.write_text("input: hi\nsetup: not a dict\n")
+    with pytest.raises(ValueError, match="setup' must be a mapping"):
+        load_scenarios(tmp_path)
+
+
+def test_apply_scenario_setup_env_override():
+    import os
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    saved = os.environ.get("TEST_EVAL_VAR")
+    try:
+        scen = Scenario(
+            name="x", description="", input="",
+            setup={"env": {"TEST_EVAL_VAR": "set-value"}},
+        )
+        with apply_scenario_setup(scen):
+            assert os.environ["TEST_EVAL_VAR"] == "set-value"
+        # Restored after exit.
+        assert os.environ.get("TEST_EVAL_VAR") == saved
+    finally:
+        if saved is None:
+            os.environ.pop("TEST_EVAL_VAR", None)
+        else:
+            os.environ["TEST_EVAL_VAR"] = saved
+
+
+def test_apply_scenario_setup_tmp_dir_substitution():
+    import os
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    scen = Scenario(
+        name="x", description="", input="",
+        setup={"env": {"TEST_TMP_VAL": "{tmp_dir}/sub/path"}},
+    )
+    with apply_scenario_setup(scen) as tmp_dir:
+        value = os.environ["TEST_TMP_VAL"]
+        assert value.endswith("/sub/path")
+        assert str(tmp_dir) in value
+    os.environ.pop("TEST_TMP_VAL", None)
+
+
+def test_apply_scenario_setup_create_obsidian_notes():
+    from pathlib import Path
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    scen = Scenario(
+        name="x", description="", input="",
+        setup={
+            "env": {"X_VAULT": "{tmp_dir}/vault"},
+            "prepare": [
+                {"create_obsidian_notes": {
+                    "count": 12,
+                    "folders": ["Inbox", "Areas"],
+                }},
+            ],
+        },
+    )
+    with apply_scenario_setup(scen) as tmp_dir:
+        inbox = Path(tmp_dir) / "vault" / "Inbox"
+        areas = Path(tmp_dir) / "vault" / "Areas"
+        assert inbox.is_dir()
+        assert areas.is_dir()
+        assert len(list(inbox.glob("*.md"))) == 6
+        assert len(list(areas.glob("*.md"))) == 6
+
+
+def test_apply_scenario_setup_cleans_up_tmp_dir():
+    from pathlib import Path
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    scen = Scenario(
+        name="x", description="", input="",
+        setup={"prepare": [{"create_obsidian_notes": {"count": 3}}]},
+    )
+    with apply_scenario_setup(scen) as tmp_dir:
+        path = Path(tmp_dir)
+        assert path.exists()
+    # Removed after exit.
+    assert not path.exists()
+
+
+def test_apply_scenario_setup_unknown_prepare_action_raises():
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    scen = Scenario(
+        name="x", description="", input="",
+        setup={"prepare": [{"not_a_real_action": {}}]},
+    )
+    with pytest.raises(ValueError, match="unknown prepare action"):
+        with apply_scenario_setup(scen):
+            pass
+
+
+def test_apply_scenario_setup_noop_for_empty_setup():
+    from ambi.evals import Scenario, apply_scenario_setup
+
+    scen = Scenario(name="x", description="", input="", setup={})
+    with apply_scenario_setup(scen) as tmp_dir:
+        assert tmp_dir is None
+
+
+def test_register_prepare_action():
+    from ambi.evals import (
+        Scenario, apply_scenario_setup, register_prepare_action,
+    )
+
+    called = {}
+
+    def custom_action(params, tmp_dir):
+        called["params"] = params
+        called["tmp_dir"] = tmp_dir
+
+    register_prepare_action("test_custom_action", custom_action)
+    scen = Scenario(
+        name="x", description="", input="",
+        setup={"prepare": [{"test_custom_action": {"foo": "bar"}}]},
+    )
+    with apply_scenario_setup(scen) as tmp_dir:
+        assert called["params"] == {"foo": "bar"}
+        assert called["tmp_dir"] == tmp_dir

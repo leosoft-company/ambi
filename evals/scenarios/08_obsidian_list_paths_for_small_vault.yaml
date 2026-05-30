@@ -1,0 +1,19 @@
+name: obsidian_list_paths_for_small_vault
+description: |
+  When the vault has few notes, obsidian_list should return verbatim
+  paths (not the folder-breakdown summary). Catches the inverse
+  regression: agent shouldn't claim "too many" on a small vault.
+setup:
+  env:
+    OBSIDIAN_VAULT: "{tmp_dir}/vault"
+  prepare:
+    - create_obsidian_notes:
+        count: 5
+        folders: [Inbox]
+input: "list the notes in my inbox folder"
+assert:
+  - tool_called: obsidian_list
+  # Inverse: should NOT say "too many to list" for a tiny vault.
+  - text_not_contains: "too many to list"
+  # Should mention at least one of the seeded notes by name.
+  - text_matches: "note_\\d{4}"

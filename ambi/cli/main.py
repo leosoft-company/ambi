@@ -653,7 +653,7 @@ async def _run_evals(args: argparse.Namespace) -> int:
     from rich.table import Table
     from rich.text import Text
 
-    from ..evals import load_scenarios, run_scenario
+    from ..evals import apply_scenario_setup, load_scenarios, run_scenario
     from .build import build_agent
 
     _load_runtime_env()
@@ -683,12 +683,23 @@ async def _run_evals(args: argparse.Namespace) -> int:
 
     results = []
     for scenario in scenarios:
-        # Each scenario gets a fresh agent (no shared session state).
-        # We force a temp AMBI_HOME so eval runs don't touch real state.
-        agent = build_agent(
-            extra_tools=[], with_hippocamp=False, task_store=None,
-        )
-        result = await run_scenario(scenario, agent)
+        # Apply scenario setup (env overrides, prepare actions) first so
+        # build_agent picks up the overrides. Setup is cleaned up after the
+        # scenario completes.
+        with apply_scenario_setup(scenario):
+            agent = build_agent(
+                extra_tools=[], with_hippocamp=False, task_store=None,
+            )
+            try:
+                result = await run_scenario(scenario, agent)
+            except Exception as e:
+                from ..evals import ScenarioResult
+                result = ScenarioResult(
+                    scenario=scenario, response_text="",
+                    tools_called=[], input_tokens=0, output_tokens=0,
+                    cost_usd=0.0, error=f"{type(e).__name__}: {e}",
+                    assertion_results=[],
+                )
         results.append(result)
         _print_scenario_result(console, result)
 

@@ -23,10 +23,14 @@ Example scenario::
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -53,6 +57,7 @@ class Scenario:
     description: str
     input: str
     assertions: list[Assertion] = field(default_factory=list)
+    setup: dict = field(default_factory=dict)
     source_path: Path | None = None
 
 
@@ -113,11 +118,16 @@ def _load_one(path: Path) -> Scenario:
         (atype, avalue), = item.items()
         assertions.append(Assertion(type=atype, value=avalue))
 
+    setup = raw.get("setup") or {}
+    if not isinstance(setup, dict):
+        raise ValueError(f"{path}: 'setup' must be a mapping")
+
     return Scenario(
         name=raw.get("name") or path.stem,
         description=raw.get("description", "") or "",
         input=str(raw["input"]),
         assertions=assertions,
+        setup=setup,
         source_path=path,
     )
 
@@ -245,3 +255,109 @@ def _extract_usage_for(agent: Agent) -> tuple[int, int, float]:
     responses is left to callers that want it.
     """
     return 0, 0, 0.0
+
+
+# ---------------------------------------------------------------------------
+# Setup: env overrides + prepare actions
+# ---------------------------------------------------------------------------
+
+
+PrepareAction = Callable[[dict, Path], None]
+_PREPARE_REGISTRY: dict[str, PrepareAction] = {}
+
+
+def register_prepare_action(name: str, fn: PrepareAction) -> None:
+    """Add a custom prepare action that scenarios can declare under setup.prepare."""
+    _PREPARE_REGISTRY[name] = fn
+
+
+@contextmanager
+def apply_scenario_setup(scenario: Scenario):
+    """Context manager that applies a scenario's setup block.
+
+    - Creates a per-scenario tmp directory.
+    - Overrides os.environ values from `setup.env`, substituting
+      `{tmp_dir}` in string values.
+    - Runs each `setup.prepare` action against the tmp dir.
+
+    On exit: restores the original env and removes the tmp dir.
+    """
+    if not scenario.setup:
+        yield None
+        return
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ambi-eval-"))
+    saved_env: dict[str, str | None] = {}
+    try:
+        env_overrides = scenario.setup.get("env") or {}
+        if not isinstance(env_overrides, dict):
+            raise ValueError("setup.env must be a mapping")
+        for key, value in env_overrides.items():
+            saved_env[key] = os.environ.get(key)
+            os.environ[key] = str(value).format(tmp_dir=str(tmp_dir))
+
+        prepare = scenario.setup.get("prepare") or []
+        if not isinstance(prepare, list):
+            raise ValueError("setup.prepare must be a list")
+        for action in prepare:
+            if not isinstance(action, dict) or len(action) != 1:
+                raise ValueError(
+                    f"each prepare action must be a single-key mapping, got {action!r}"
+                )
+            (kind, params), = action.items()
+            handler = _PREPARE_REGISTRY.get(kind)
+            if handler is None:
+                raise ValueError(
+                    f"unknown prepare action {kind!r}. "
+                    f"Available: {sorted(_PREPARE_REGISTRY)}"
+                )
+            handler(params or {}, tmp_dir)
+
+        yield tmp_dir
+    finally:
+        for key, original in saved_env.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Built-in prepare actions
+# ---------------------------------------------------------------------------
+
+
+def _prepare_create_obsidian_notes(params: dict, tmp_dir: Path) -> None:
+    """Populate a temp Obsidian vault with N notes distributed across folders.
+
+    Pair with `setup.env.OBSIDIAN_VAULT: "{tmp_dir}/vault"` so the agent's
+    obsidian_* tools read from the seeded directory.
+
+    Params:
+        count   total number of notes to create (default 100)
+        folders list of relative folder paths (default ['Inbox'])
+        vault   subpath under tmp_dir to use as the vault root (default 'vault')
+    """
+    count = int(params.get("count", 100))
+    folders = params.get("folders") or ["Inbox"]
+    vault_subpath = params.get("vault", "vault")
+
+    vault = tmp_dir / vault_subpath
+    vault.mkdir(parents=True, exist_ok=True)
+
+    per_folder = max(1, count // len(folders))
+    remaining = count
+    for folder in folders:
+        d = vault / folder
+        d.mkdir(parents=True, exist_ok=True)
+        n = min(per_folder, remaining)
+        for i in range(n):
+            (d / f"note_{i:04d}.md").write_text(
+                f"---\ntitle: note {i} in {folder}\n---\n\n"
+                f"Body of note {i}.\n"
+            )
+        remaining -= n
+
+
+register_prepare_action("create_obsidian_notes", _prepare_create_obsidian_notes)
