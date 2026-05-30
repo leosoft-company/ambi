@@ -153,6 +153,7 @@ def build_agent(
     system = load_system_prompt(with_hippocamp=with_hippocamp)
 
     compaction_threshold = int(os.getenv("AMBI_COMPACTION_THRESHOLD", "15"))
+    context_window_turns = int(os.getenv("AMBI_CONTEXT_WINDOW_TURNS", "20"))
 
     # Warden: pre-execution policy enforcement. Defaults are conservative:
     #   - ArgvValidator blocks the truly destructive run_command argv shapes.
@@ -183,5 +184,6 @@ def build_agent(
         sensegate=gate,
         store=SqliteStore(paths.session_db()),
         compaction_threshold=compaction_threshold,
+        context_window_turns=context_window_turns,
         warden=warden,
     )

@@ -65,7 +65,12 @@ AMBI_VERIFY_READS=0
 # === Model selection ===
 # AMBI_MODEL=gemini-2.5-flash
 
-# === Compaction ===
+# === Context window + compaction ===
+# How many of the most-recent user-text turns are kept verbatim in the
+# LLM-facing slice (with all assistant + tool messages between them).
+# Each turn ~3 messages with tool use; cost scales linearly.
+# AMBI_CONTEXT_WINDOW_TURNS=20
+#
 # Once this many user-text turns accumulate beyond the verbatim window,
 # they get summarized into a single anchor for long-term recall. 0 = off.
 # AMBI_COMPACTION_THRESHOLD=15
