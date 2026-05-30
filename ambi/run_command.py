@@ -10,11 +10,63 @@ treated equivalently.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .tool import Tool, ToolKind
 from .types import ToolDef
+
+
+# Argument-level escapes that let an allowlisted command launch *another*
+# command or destroy files, bypassing the argv[0] allowlist. `find -exec`,
+# `find -delete`, `xargs`-style fan-out, etc. Matched case-sensitively as
+# exact argv tokens (these are literal flag spellings).
+DEFAULT_FORBIDDEN_ARGS = frozenset({
+    "-exec", "-execdir", "-ok", "-okdir", "-delete",
+    "-fprint", "-fprintf", "-fprint0",
+})
+
+# Path globs that must never be passed to run_command — secrets that a
+# hijacked agent could read (`cat`) and then be coaxed into exfiltrating.
+# Matched (case-insensitively) against each argv token's raw, ~-expanded, and
+# fully-resolved forms, and against its basename. Tighten/extend via the
+# CommandPolicy.denied_path_patterns field.
+DEFAULT_DENIED_PATHS = frozenset({
+    "*/.env", "*.env", "*/.env.*",          # dotenv (incl. .env.local etc.)
+    "*/.ssh/*", "*/id_rsa*", "*/id_ed25519*", "*/id_ecdsa*", "*/id_dsa*",
+    "*/.aws/*", "*/.gnupg/*",
+    "*/.netrc", "*/_netrc",
+    "*/.config/gh/*", "*/.config/gcloud/*",
+    "*/.ambi/.env",
+})
+
+# Suffixes that look like a secret path but are conventionally safe templates
+# (committed, no real secrets) — exempt so the assistant can still read them.
+_SAFE_SECRET_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def _is_denied_path(token: str, cwd: Path | None, patterns: frozenset[str]) -> bool:
+    base = os.path.basename(token.rstrip("/"))
+    if base.lower().endswith(_SAFE_SECRET_SUFFIXES):
+        return False
+    expanded = os.path.expanduser(token)
+    forms = {token, expanded}
+    try:
+        root = cwd if cwd is not None else Path.cwd()
+        forms.add(str((root / expanded).resolve()))
+        forms.add(str(Path(expanded).resolve()))
+    except (OSError, ValueError, RuntimeError):
+        pass
+    for form in forms:
+        norm = form.replace("\\", "/").lower()
+        cand = (norm, os.path.basename(norm))
+        for pat in patterns:
+            pl = pat.lower()
+            if any(fnmatch.fnmatch(c, pl) for c in cand):
+                return True
+    return False
 
 
 @dataclass
@@ -25,6 +77,8 @@ class CommandPolicy:
     cwd_root: Path | None = None
     default_timeout: float = 30.0
     max_output_bytes: int = 100_000
+    forbidden_args: frozenset[str] = DEFAULT_FORBIDDEN_ARGS
+    denied_path_patterns: frozenset[str] = DEFAULT_DENIED_PATHS
 
 
 def make_run_command_tool(
@@ -59,6 +113,16 @@ def make_run_command_tool(
                 f"Allowed: {allowed_list}"
             )
 
+        # Block argument-level escapes (e.g. `find … -exec sh -c …`) that would
+        # spawn an arbitrary, un-allowlisted command. Cheap second layer behind
+        # the allowlist itself.
+        forbidden = policy.forbidden_args & set(argv[1:])
+        if forbidden:
+            return (
+                f"Error: argument(s) {sorted(forbidden)} are forbidden — they "
+                f"can launch un-allowlisted commands or delete files."
+            )
+
         cwd_path: Path | None = None
         cwd_raw = args.get("cwd")
         if cwd_raw:
@@ -71,6 +135,16 @@ def make_run_command_tool(
                     return f"Error: cwd '{cwd_raw}' must be under {root}"
             if not cwd_path.is_dir():
                 return f"Error: cwd '{cwd_raw}' is not a directory."
+
+        # Block reads of sensitive paths (e.g. `cat .env`, `grep x ~/.ssh/id_rsa`).
+        # Resolution is cwd-relative so relative paths are caught too.
+        if policy.denied_path_patterns:
+            for token in argv[1:]:
+                if _is_denied_path(token, cwd_path, policy.denied_path_patterns):
+                    return (
+                        f"Error: access to sensitive path '{token}' is blocked "
+                        f"by policy."
+                    )
 
         timeout = float(args.get("timeout") or policy.default_timeout)
 

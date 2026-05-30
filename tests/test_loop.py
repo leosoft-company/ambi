@@ -1044,6 +1044,155 @@ async def test_warden_denial_becomes_error_tool_result():
     assert "argv_validator" in res.content
 
 
+async def test_require_confirmation_fails_closed_without_confirmer():
+    """A require_confirmation verdict with no confirmer must NOT execute."""
+    from ambi.warden import RequireConfirmationPolicy, Warden
+
+    tools = ToolRegistry()
+    ran = []
+
+    async def push(args):
+        ran.append(args)
+        return "pushed"
+
+    tools.register(_tool("run_command", push, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command",
+                input={"argv": ["git", "push", "origin", "main"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("blocked")], stop_reason="end_turn"),
+    ])
+    warden = Warden(policies=[RequireConfirmationPolicy(argv_patterns=["git push"])])
+    agent = Agent(provider=provider, tools=tools, system="s", warden=warden)
+    await agent.chat("push it")
+
+    assert ran == []  # never executed
+    res = agent.messages[2].content[0]
+    assert isinstance(res, ToolResultBlock)
+    assert res.is_error
+    assert "Requires confirmation" in res.content
+    assert "fail-closed" in res.content
+
+
+async def test_require_confirmation_executes_when_approved():
+    from ambi.warden import RequireConfirmationPolicy, Warden
+
+    tools = ToolRegistry()
+    ran = []
+
+    async def push(args):
+        ran.append(args)
+        return "pushed"
+
+    tools.register(_tool("run_command", push, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command",
+                input={"argv": ["git", "push"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("done")], stop_reason="end_turn"),
+    ])
+    warden = Warden(policies=[RequireConfirmationPolicy(argv_patterns=["git push"])])
+    seen = []
+
+    async def approve(ctx, decision):
+        seen.append((ctx.tool_name, decision.verdict))
+        return True
+
+    agent = Agent(
+        provider=provider, tools=tools, system="s",
+        warden=warden, confirm=approve,
+    )
+    await agent.chat("push it")
+
+    assert len(ran) == 1  # executed after approval
+    assert seen == [("run_command", "require_confirmation")]
+    assert agent.messages[2].content[0].content == "pushed"
+
+
+async def test_require_confirmation_declined_does_not_execute():
+    from ambi.warden import RequireConfirmationPolicy, Warden
+
+    tools = ToolRegistry()
+    ran = []
+
+    async def push(args):
+        ran.append(args)
+        return "pushed"
+
+    tools.register(_tool("run_command", push, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command", input={"argv": ["git", "push"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("ok, skipped")], stop_reason="end_turn"),
+    ])
+    warden = Warden(policies=[RequireConfirmationPolicy(argv_patterns=["git push"])])
+
+    async def decline(ctx, decision):
+        return False
+
+    agent = Agent(
+        provider=provider, tools=tools, system="s",
+        warden=warden, confirm=decline,
+    )
+    await agent.chat("push it")
+
+    assert ran == []
+    res = agent.messages[2].content[0]
+    assert res.is_error
+    assert "declined by user" in res.content
+
+
+async def test_confirmer_error_fails_closed():
+    """A confirmer that raises must be read as a decline, not approval."""
+    from ambi.warden import RequireConfirmationPolicy, Warden
+
+    tools = ToolRegistry()
+    ran = []
+
+    async def push(args):
+        ran.append(args)
+        return "pushed"
+
+    tools.register(_tool("run_command", push, kind="write"))
+
+    provider = MockProvider([
+        CompletionResult(
+            content=[ToolUseBlock(
+                id="t1", name="run_command", input={"argv": ["git", "push"]},
+            )],
+            stop_reason="tool_use",
+        ),
+        CompletionResult(content=[TextBlock("blocked")], stop_reason="end_turn"),
+    ])
+    warden = Warden(policies=[RequireConfirmationPolicy(argv_patterns=["git push"])])
+
+    async def boom(ctx, decision):
+        raise RuntimeError("confirmer crashed")
+
+    agent = Agent(
+        provider=provider, tools=tools, system="s",
+        warden=warden, confirm=boom,
+    )
+    await agent.chat("push it")
+    assert ran == []
+    assert agent.messages[2].content[0].is_error
+
+
 async def test_warden_audit_log_records_each_authorization():
     from ambi.warden import ArgvValidatorPolicy, Warden
 

