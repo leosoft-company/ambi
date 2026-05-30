@@ -65,6 +65,13 @@ AMBI_VERIFY_READS=0
 # === Model selection ===
 # AMBI_MODEL=gemini-2.5-flash
 
+# === Output + thinking budget (per chat turn) ===
+# Gemini's thinking tokens count against max_output_tokens. With a small
+# budget, thinking can eat the whole budget and the visible reply ends
+# up empty. Defaults give thinking + reply both plenty of room.
+# AMBI_MAX_TOKENS=16384
+# AMBI_THINKING_BUDGET=4096
+
 # === Context window + compaction ===
 # How many of the most-recent user-text turns are kept verbatim in the
 # LLM-facing slice (with all assistant + tool messages between them).

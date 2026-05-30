@@ -67,6 +67,8 @@ class Agent:
         max_block_chars: int | None = 8000,
         compaction_threshold: int = 0,
         warden: Warden | None = None,
+        max_tokens: int = 4096,
+        provider_kwargs: dict | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -79,6 +81,8 @@ class Agent:
         self.max_block_chars = max_block_chars
         self.compaction_threshold = compaction_threshold
         self.warden = warden
+        self.max_tokens = max_tokens
+        self.provider_kwargs = provider_kwargs or {}
         if skills is not None:
             tools.register(make_load_skill_tool(skills))
         self.system = assemble_system(system, skills)
@@ -115,6 +119,8 @@ class Agent:
                     self._context_view(),
                     self.tools.defs(),
                     system=self.system,
+                    max_tokens=self.max_tokens,
+                    **self.provider_kwargs,
                 )
                 self.messages.append(Message("assistant", result.content))
 
@@ -194,6 +200,8 @@ class Agent:
                     self._context_view(),
                     self.tools.defs(),
                     system=self.system,
+                    max_tokens=self.max_tokens,
+                    **self.provider_kwargs,
                 ):
                     if isinstance(chunk, TextChunk):
                         text_buf += chunk.text
@@ -543,10 +551,21 @@ def _build_compaction_prompt(segment: list[Message]) -> str:
                 lines.append(f"{m.role}: [tool result {b._tool_name} {tag}] {content[:400]}")
     body = "\n".join(lines)
     return (
-        "Summarize the following conversation segment as a single short "
-        "paragraph for the agent's long-term recall.\n\n"
-        "Preserve: stable facts the user shared, decisions or commitments, "
-        "tool calls and their outcomes (success/failure, IDs), open threads.\n"
-        "Drop: pleasantries, exact phrasing, already-resolved questions.\n\n"
+        "Summarize the following conversation segment as a short paragraph "
+        "for the agent's long-term recall.\n\n"
+        "PRESERVE VERBATIM — never paraphrase these:\n"
+        "  - Named entities: people, places, projects, products, "
+        "technologies, file paths, tool names, command names. "
+        "Write 'Warden' (the project name), not 'a recent project'. "
+        "Write 'Postgres', not 'a database'. Write 'obsidian_search', "
+        "not 'a search tool'.\n"
+        "  - Specific values: numbers, IDs, dates, URLs, error codes, "
+        "exit codes.\n"
+        "  - Decisions, commitments, preferences, deadlines as stated.\n"
+        "  - Tool calls and their outcomes (success/failure, returned IDs).\n\n"
+        "Drop only:\n"
+        "  - Pleasantries and small talk.\n"
+        "  - The exact phrasing of routine acknowledgements.\n"
+        "  - Questions that were resolved within the segment.\n\n"
         f"--- segment ---\n{body}\n--- end ---"
     )

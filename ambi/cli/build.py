@@ -176,6 +176,13 @@ def build_agent(
         ),
     ])
 
+    # Generous max_output_tokens + explicit thinking budget so Gemini's
+    # invisible reasoning doesn't eat the whole response budget. ambi-lite
+    # showed that 4096-thinking + 65536-output is the reliability win;
+    # 16384 output is enough for most replies while keeping cost bounded.
+    main_max_tokens = int(os.getenv("AMBI_MAX_TOKENS", "16384"))
+    main_thinking_budget = int(os.getenv("AMBI_THINKING_BUDGET", "4096"))
+
     return Agent(
         provider=provider,
         tools=tools,
@@ -186,4 +193,10 @@ def build_agent(
         compaction_threshold=compaction_threshold,
         context_window_turns=context_window_turns,
         warden=warden,
+        max_tokens=main_max_tokens,
+        provider_kwargs={
+            "thinking_config": gt.ThinkingConfig(
+                thinking_budget=main_thinking_budget,
+            ),
+        },
     )
