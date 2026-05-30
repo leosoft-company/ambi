@@ -24,6 +24,7 @@ ambi-core/
 │   ├── store.py                    # SqliteStore (durable session)
 │   ├── run_command.py              # allowlisted external commands (+ forbidden-arg / secret-path denylists)
 │   ├── evals.py                    # behavioral eval harness (scenarios, assertions, runner, setup)
+│   ├── observability.py            # logging config + per-turn telemetry store + metrics
 │   ├── mcp.py                      # McpServer + mcp_tools() — wrap any stdio MCP server
 │   ├── env.py                      # load_env, require_env
 │   ├── integrations/
@@ -250,6 +251,9 @@ The primary threat is prompt injection via untrusted tool output. Defenses are l
 | `ambi chat` | Local REPL. Rich panels, prompt_toolkit input (bracketed paste, history), streaming. |
 | `ambi run` | Telegram daemon + scheduler. Persistent session shared with `ambi chat`. |
 | `ambi eval [path]` | Run behavioral scenarios (default `evals/scenarios/`) against a real provider; per-scenario panel + summary table; exit non-zero on any failure. See *Evals*. |
+| `ambi logs [-n N]` | Recent agent turns from the telemetry store as a table. See *Observability*. |
+| `ambi status` | Aggregate health over recent turns (error rate, latency p50/p95, cost, by-trigger). |
+| `ambi usage` | Token + cost summary (today / 7d / all-time) from the usage store. |
 | `ambi version` | Print version. |
 
 Env layering: `~/.ambi/.env` (defaults) → project-local `./.env` (overrides). Project file wins on conflicting keys; home file fills the rest.
@@ -282,6 +286,18 @@ setup:
   prepare:
     - create_obsidian_notes: { count: 150, folders: [Inbox, Areas/Work] }
 ```
+
+## Observability
+
+`ambi/observability.py` has three layers:
+
+1. **Logging** — `setup_logging(log_dir, level, stderr)` configures the `ambi` logger namespace (rotating file at `~/.ambi/logs/ambi.log`; stderr for the daemon; level from `AMBI_LOG_LEVEL`). It is idempotent and **must be called at startup** — the entrypoints (`_run_chat` / `_run_daemon` / `_run_evals`) do. Without it, every `logging.getLogger("ambi.*")` call in the codebase is silently dropped. `loop.py` logs `turn_start` / `tool_call` / `warden_deny` / `warden_confirm` / `sensegate_flag` / `turn_end` / `turn_error` / `turn_max_turns`, all correlated by a per-turn `turn_id`.
+
+2. **Per-turn telemetry** — the Agent emits one `TurnRecord` per turn to an optional `TelemetrySink` (the `Agent(telemetry=...)` hook; `build_agent` wires a `TelemetryStore` at `~/.ambi/data/telemetry.db`). The record captures trigger, tools, tokens, cost (diffed from the `TrackingProvider`'s `usage_snapshot()`), duration, outcome (`ok`/`error`/`max_turns`), Warden denials, and the SenseGate flag. `current_trigger` (a contextvar, set via `with trigger("telegram")` etc.) tags who drove the turn. Emission is best-effort and wrapped so telemetry can never break the chat path.
+
+3. **Metrics** — `TelemetryStore.summary()` aggregates recent turns into a `MetricsSummary` (counts, error rate, latency p50/p95, cost, by-trigger). Surfaced via `ambi logs`, `ambi status`, and Telegram `/status`.
+
+The split from `usage.py`: `UsageStore` is per-*LLM-call* token/cost accounting (includes SenseGate + compaction calls); `TelemetryStore` is per-*turn* outcome/latency. They answer different questions ("what did the model cost" vs "what did this turn do and how did it go").
 
 ## Concurrency
 

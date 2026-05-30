@@ -195,12 +195,14 @@ class TelegramTransport:
         allowed_user_ids: set[int] | None = None,
         chat_timeout: float = 180.0,
         task_store: TaskStore | None = None,
+        telemetry_store=None,  # observability.TelemetryStore | None
     ):
         self.agent = agent
         self.bot_token = bot_token
         self.allowed_user_ids = allowed_user_ids
         self.chat_timeout = chat_timeout
         self.task_store = task_store
+        self.telemetry_store = telemetry_store
         self._app: Application | None = None
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -211,6 +213,12 @@ class TelegramTransport:
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
+        if not self.allowed_user_ids:
+            log.warning(
+                "telegram_open_to_everyone: TELEGRAM_ALLOWED_USER_IDS is empty — "
+                "ANYONE who finds this bot can talk to it and run its tools. "
+                "Set it to your numeric Telegram user id(s) before exposing the bot."
+            )
         self._app = (
             Application.builder()
             .token(self.bot_token)
@@ -221,6 +229,8 @@ class TelegramTransport:
         self._app.add_handler(CommandHandler("ping", self._cmd_ping))
         if self.task_store is not None:
             self._app.add_handler(CommandHandler("scheduled", self._cmd_scheduled))
+        if self.telemetry_store is not None:
+            self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -277,6 +287,28 @@ class TelegramTransport:
         tasks = await self.task_store.list(include_done=include_done)
         text = format_scheduled_list(tasks, include_done=include_done)
         await self._send_split(update, text)
+
+    async def _cmd_status(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if self.telemetry_store is None:
+            await update.message.reply_text("Telemetry not wired.")
+            return
+        s = await self.telemetry_store.summary()
+        if s.turns == 0:
+            await update.message.reply_text("No turns recorded yet.")
+            return
+        by_trig = ", ".join(f"{k}={v}" for k, v in sorted(s.by_trigger.items()))
+        await update.message.reply_text(
+            f"📊 last {s.turns} turns\n"
+            f"errors {s.errors} ({s.error_rate:.0%}) · max-turns {s.max_turns_hits}\n"
+            f"latency p50 {s.p50_ms}ms · p95 {s.p95_ms}ms\n"
+            f"tools {s.total_tool_calls} · tokens {s.input_tokens}/{s.output_tokens} "
+            f"· cost ${s.cost_usd:.4f}\n"
+            f"by trigger: {by_trig}"
+        )
 
     async def _on_message(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
@@ -356,6 +388,10 @@ class TelegramTransport:
 
         editor_task = asyncio.create_task(edit_loop())
 
+        # Tag every turn this transport drives as "telegram" for telemetry.
+        from ..observability import current_trigger
+        trigger_token = current_trigger.set("telegram")
+
         try:
             async for ev in self.agent.chat_stream(text):
                 if isinstance(ev, TextDelta):
@@ -378,6 +414,7 @@ class TelegramTransport:
         finally:
             state["done"] = True
             editor_task.cancel()
+            current_trigger.reset(trigger_token)
 
         # Final flush — prefer the agent's canonical final_text (from
         # ChatComplete) over the streaming buffer. The buffer may have been

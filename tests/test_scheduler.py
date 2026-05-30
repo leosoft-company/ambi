@@ -148,6 +148,23 @@ async def test_scheduler_fires_due_task_via_agent(tmp_path):
     assert delivered == [("Run a thing.", "done")]
 
 
+async def test_scheduler_caps_backlog_per_tick(tmp_path):
+    """A pile of overdue tasks drains gradually, not all in one tick."""
+    store = TaskStore(tmp_path / "tasks.db")
+    agent = _StubAgent(["ok"] * 10)
+    sched = Scheduler(store=store, agent=agent, max_per_tick=2)
+
+    for i in range(5):
+        await store.create(f"task {i}", run_at=_later(-1))
+
+    await sched._tick()
+    assert len(agent.calls) == 2  # capped
+    await sched._tick()
+    assert len(agent.calls) == 4
+    await sched._tick()
+    assert len(agent.calls) == 5  # backlog drained, nothing left over
+
+
 async def test_scheduler_advances_recurring_run_at(tmp_path):
     store = TaskStore(tmp_path / "tasks.db")
     agent = _StubAgent(["ok"])

@@ -111,6 +111,7 @@ class TaskStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")  # concurrent reads/writes
             await db.executescript(_SCHEMA)
             await db.commit()
         self._initialized = True
@@ -226,11 +227,17 @@ class Scheduler:
         agent,  # ambi.Agent — runtime type to avoid import cycle
         on_result: ResultHandler | None = None,
         check_interval: float = 30.0,
+        max_per_tick: int = 5,
     ):
         self.store = store
         self.agent = agent
         self.on_result = on_result
         self.check_interval = check_interval
+        # Cap how many due tasks fire in a single tick. After downtime,
+        # due_before() can return a large backlog; firing all at once means a
+        # burst of (serialized, LLM-cost) chat() calls. The cap drains the
+        # backlog gradually over successive ticks instead of stampeding.
+        self.max_per_tick = max_per_tick
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -268,13 +275,22 @@ class Scheduler:
     async def _tick(self) -> None:
         now = _now_utc()
         due = await self.store.due_before(now)
+        if len(due) > self.max_per_tick:
+            log.warning(
+                "scheduler_backlog due=%d firing=%d (rest next tick)",
+                len(due), self.max_per_tick,
+            )
+            due = due[: self.max_per_tick]
         for task in due:
             await self._fire(task)
 
     async def _fire(self, task: ScheduledTask) -> None:
+        from .observability import trigger
+
         ran_at = _now_utc()
         try:
-            reply = await self.agent.chat(task.prompt)
+            with trigger("scheduled"):
+                reply = await self.agent.chat(task.prompt)
         except Exception as e:
             log.exception("scheduler_fire_failed task=%s", task.id)
             reply = f"Error executing scheduled task: {type(e).__name__}: {e}"

@@ -209,15 +209,18 @@ async def run_scenario(scenario: Scenario, agent: Agent) -> ScenarioResult:
     final_text = ""
     error: str | None = None
 
+    from .observability import trigger
+
     # Snapshot usage before/after so tokens + cost are attributed to *this*
     # scenario's turn, even if the agent (and its TrackingProvider) is reused.
     before = _usage_snapshot(agent)
     try:
-        async for ev in agent.chat_stream(scenario.input):
-            if isinstance(ev, ToolUseEvent):
-                tools_called.append(ev.name)
-            elif isinstance(ev, ChatComplete):
-                final_text = ev.final_text
+        with trigger("eval"):
+            async for ev in agent.chat_stream(scenario.input):
+                if isinstance(ev, ToolUseEvent):
+                    tools_called.append(ev.name)
+                elif isinstance(ev, ChatComplete):
+                    final_text = ev.final_text
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 
@@ -256,14 +259,9 @@ def _usage_snapshot(agent: Agent) -> tuple[int, int, float]:
     evals run fine against a bare provider, the cost/token assertions just
     can't bind.
     """
-    snapshot = getattr(getattr(agent, "provider", None), "usage_snapshot", None)
-    if not callable(snapshot):
-        return 0, 0, 0.0
-    try:
-        ti, to_, cost = snapshot()
-        return int(ti), int(to_), float(cost)
-    except Exception:
-        return 0, 0, 0.0
+    from .observability import provider_usage
+
+    return provider_usage(getattr(agent, "provider", None))
 
 
 # ---------------------------------------------------------------------------

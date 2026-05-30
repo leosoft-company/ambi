@@ -2,7 +2,7 @@
 
 > **ambi** — *ambient memory-backed intelligence*. A personal-agent harness that runs always-on, remembers via [Hippocamp](https://github.com/leosoft-company/hippocamp), and verifies what it does.
 
-A provider-agnostic agent runtime: a single continuous conversation against any LLM, with first-class skills, action verification (SenseGate), external tool execution, MCP integration, persistent history, scheduled tasks, and Telegram delivery.
+An agent runtime built on a clean provider seam (a Gemini adapter ships today; other LLMs slot in behind the same `LLMProvider` protocol): a single continuous conversation with first-class skills, action verification (SenseGate), external tool execution, MCP integration, persistent history, scheduled tasks, and Telegram delivery.
 
 Built as the runtime half of a personal-AI stack. Pair it with Hippocamp for long-term memory that follows you across hosts.
 
@@ -29,6 +29,7 @@ Built as the runtime half of a personal-AI stack. Pair it with Hippocamp for lon
 | Run-command      | Allowlisted external commands via `make_run_command_tool(CommandPolicy)`. Argv-only (no shell), cwd jail, timeout, output cap, forbidden-arg + secret-path denylists. |
 | Transports       | `TelegramTransport` — polling, allowlist auth, typing indicator, message splitting, reply-context extraction, `/scheduled` command. |
 | Evals            | Behavioral test harness. YAML scenarios (input + assertions on text/tools/cost) run against a real provider via `ambi eval`. Catches prompt regressions unit tests can't. See [Evals](#evals). |
+| Observability    | Configurable logging (rotating file + stderr) and per-turn telemetry (trigger, tools, tokens, cost, duration, outcome). Inspect with `ambi logs` / `ambi status`; `/status` over Telegram. |
 
 ## Setup (fresh machine)
 
@@ -134,6 +135,9 @@ Restart `ambi run` / `ambi chat`. The agent now has `recall_memory` / `update_me
 ambi chat       # local REPL (any directory)
 ambi run        # daemon (Telegram + scheduler)
 ambi eval       # run behavioral scenarios in evals/ (see Evals)
+ambi logs       # recent agent turns (telemetry)
+ambi status     # aggregate health: error rate, latency, cost
+ambi usage      # token + cost summary
 ambi init       # idempotent — safe to re-run after upgrades
 ambi version    # print version
 ```
@@ -376,6 +380,27 @@ assert:
   - text_not_matches: "(?i)clipped|cannot retrieve"
 ```
 
+## Observability
+
+Logging is configured at startup (`ambi run` / `chat` / `eval`): the `ambi.*`
+loggers write to a rotating file at `~/.ambi/logs/ambi.log`, and the daemon
+also logs to stderr. Level via `AMBI_LOG_LEVEL` (default INFO). Without this,
+the library's log calls go nowhere — so configure it (the CLI does) before
+relying on logs.
+
+Every agent turn records one telemetry row to `~/.ambi/data/telemetry.db`:
+trigger (chat / telegram / scheduled / eval), tools called, tokens, cost,
+duration, outcome (ok / error / max_turns), Warden denials, and whether
+SenseGate flagged it — correlated by a turn id that also appears in the logs.
+
+```bash
+ambi logs -n 30     # recent turns as a table
+ambi status         # error rate, latency p50/p95, cost, by-trigger counts
+```
+
+Over Telegram, `/status` returns the same health summary. Token/cost totals
+across all calls (incl. SenseGate + compaction) live in `ambi usage`.
+
 ## Project layout
 
 ```
@@ -398,6 +423,7 @@ ambi/
   store.py            SqliteStore (durable session persistence)
   run_command.py      Allowlisted external commands (+ forbidden-arg / secret-path denylists)
   evals.py            Behavioral eval harness (scenario model, assertions, runner, setup)
+  observability.py    Logging config + per-turn telemetry store + metrics
   mcp.py              McpServer + mcp_tools() wrapper
   integrations/
     hippocamp.py        MCP server wrapper for Hippocamp memory

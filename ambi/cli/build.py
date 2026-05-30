@@ -218,6 +218,9 @@ def build_agent(
     main_max_tokens = int(os.getenv("AMBI_MAX_TOKENS", "16384"))
     main_thinking_budget = int(os.getenv("AMBI_THINKING_BUDGET", "4096"))
 
+    from ..observability import TelemetryStore
+    telemetry = TelemetryStore(paths.telemetry_db())
+
     return Agent(
         provider=provider,
         tools=tools,
@@ -228,6 +231,7 @@ def build_agent(
         compaction_threshold=compaction_threshold,
         context_window_turns=context_window_turns,
         warden=warden,
+        telemetry=telemetry,
         max_tokens=main_max_tokens,
         provider_kwargs={
             "thinking_config": gt.ThinkingConfig(

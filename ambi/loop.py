@@ -1,13 +1,24 @@
 import asyncio
+import logging
+import secrets
+import time
 
 from typing import AsyncIterator, Awaitable, Callable
 
+from .observability import (
+    TelemetrySink,
+    TurnRecord,
+    current_trigger,
+    provider_usage as _provider_usage,
+)
 from .provider import LLMProvider
 from .sensegate import SenseGate, ToolInvocation, correction_message
 from .skills import SkillRegistry, assemble_system, make_load_skill_tool
 from .store import SqliteStore
 from .tool import ToolRegistry
 from .warden import PolicyContext, PolicyDecision, Warden
+
+logger = logging.getLogger("ambi.loop")
 
 # Called when a Warden policy returns require_confirmation. Returns True to
 # approve the call, False to decline. With no confirmer wired the loop
@@ -75,6 +86,7 @@ class Agent:
         compaction_threshold: int = 0,
         warden: Warden | None = None,
         confirm: ConfirmFn | None = None,
+        telemetry: TelemetrySink | None = None,
         max_tokens: int = 4096,
         provider_kwargs: dict | None = None,
         system_suffix_fn: Callable[[], str] | None = None,
@@ -91,6 +103,7 @@ class Agent:
         self.compaction_threshold = compaction_threshold
         self.warden = warden
         self.confirm = confirm
+        self.telemetry = telemetry
         self.max_tokens = max_tokens
         self.provider_kwargs = provider_kwargs or {}
         if skills is not None:
@@ -173,6 +186,16 @@ class Agent:
         # subsequent restatement turn stays tool-free for this chat() call.
         correcting = False
 
+        # Observability: one telemetry record per turn, correlated by turn_id.
+        turn_id = secrets.token_hex(4)
+        trig = current_trigger.get()
+        started = time.monotonic()
+        usage_before = _provider_usage(self.provider)
+        sensegate_flagged = False
+        logger.info(
+            "turn_start id=%s trigger=%s session=%s", turn_id, trig, self.session_id,
+        )
+
         try:
             for _ in range(max_turns):
                 # Stream one provider turn — accumulate text + tool calls.
@@ -217,6 +240,11 @@ class Agent:
                             has_write = any(
                                 inv.kind == "write" for inv in invocations
                             )
+                            sensegate_flagged = True
+                            logger.warning(
+                                "sensegate_flag id=%s write=%s reason=%s",
+                                turn_id, has_write, verdict.reason,
+                            )
                             yield SenseGateFlagEvent(reason=verdict.reason)
                             if has_write and retries_left > 0:
                                 self.messages.append(
@@ -227,6 +255,11 @@ class Agent:
                                 continue
 
                     await self._persist_new()
+                    await self._emit_turn(
+                        turn_id=turn_id, trigger=trig, started=started,
+                        usage_before=usage_before, invocations=invocations,
+                        sensegate_flagged=sensegate_flagged, outcome="ok",
+                    )
                     yield ChatComplete(final_text=final_text)
                     return
 
@@ -298,12 +331,68 @@ class Agent:
                         is_error=res.is_error,
                     )
                 self.messages.append(Message("user", list(results)))
-        except BaseException:
+        except BaseException as e:
+            logger.exception("turn_error id=%s", turn_id)
+            await self._emit_turn(
+                turn_id=turn_id, trigger=trig, started=started,
+                usage_before=usage_before, invocations=invocations,
+                sensegate_flagged=sensegate_flagged, outcome="error",
+                error=f"{type(e).__name__}: {e}",
+            )
             del self.messages[snapshot:]
             raise
 
+        logger.warning("turn_max_turns id=%s max_turns=%d", turn_id, max_turns)
+        await self._emit_turn(
+            turn_id=turn_id, trigger=trig, started=started,
+            usage_before=usage_before, invocations=invocations,
+            sensegate_flagged=sensegate_flagged, outcome="max_turns",
+        )
         del self.messages[snapshot:]
         raise MaxTurnsExceeded(max_turns)
+
+    async def _emit_turn(
+        self,
+        *,
+        turn_id: str,
+        trigger: str,
+        started: float,
+        usage_before: tuple[int, int, float],
+        invocations: list[ToolInvocation],
+        sensegate_flagged: bool,
+        outcome: str,
+        error: str | None = None,
+    ) -> None:
+        """Log a turn_end line and persist a TurnRecord (best-effort)."""
+        duration_ms = int((time.monotonic() - started) * 1000)
+        after = _provider_usage(self.provider)
+        ti, to_, cost = (
+            after[0] - usage_before[0],
+            after[1] - usage_before[1],
+            after[2] - usage_before[2],
+        )
+        tools = [inv.call.name for inv in invocations]
+        denials = sum(1 for inv in invocations if _is_policy_block(inv.result))
+        logger.info(
+            "turn_end id=%s outcome=%s tools=%d tokens=%d/%d cost=%.5f "
+            "dur_ms=%d denials=%d flagged=%s",
+            turn_id, outcome, len(tools), ti, to_, cost, duration_ms,
+            denials, sensegate_flagged,
+        )
+        if self.telemetry is None:
+            return
+        rec = TurnRecord(
+            turn_id=turn_id, session_id=self.session_id, trigger=trigger,
+            outcome=outcome, num_tool_calls=len(tools), tools=tools,
+            input_tokens=ti, output_tokens=to_, cost_usd=cost,
+            duration_ms=duration_ms, warden_denials=denials,
+            sensegate_flagged=sensegate_flagged, error=error,
+        )
+        try:
+            await self.telemetry.record(rec)
+        except Exception:
+            # Telemetry must never break the chat path.
+            logger.exception("telemetry_record_failed id=%s", turn_id)
 
     async def _persist_new(self) -> None:
         if self.store is None:
@@ -517,6 +606,10 @@ class Agent:
             )
             decision = await self.warden.authorize(ctx)
             if decision.verdict == "deny":
+                logger.warning(
+                    "warden_deny tool=%s policy=%s reason=%s",
+                    call.name, decision.policy_name, decision.reason,
+                )
                 return ToolResultBlock(
                     tool_use_id="",
                     content=(
@@ -535,6 +628,10 @@ class Agent:
                         # A confirmer that errors must not be read as
                         # approval — fail closed.
                         approved = False
+                logger.warning(
+                    "warden_confirm tool=%s policy=%s approved=%s",
+                    call.name, decision.policy_name, approved,
+                )
                 if not approved:
                     note = (
                         "declined by user"
@@ -552,18 +649,37 @@ class Agent:
                         _tool_name=call.name,
                     )
 
+        t0 = time.monotonic()
         try:
-            return await asyncio.wait_for(
+            res = await asyncio.wait_for(
                 self.tools.invoke(call.name, call.input, progress=progress),
                 timeout=self.tool_timeout,
             )
         except asyncio.TimeoutError:
+            logger.warning(
+                "tool_timeout tool=%s after=%.1fs", call.name, self.tool_timeout,
+            )
             return ToolResultBlock(
                 tool_use_id="",
                 content=f"Tool '{call.name}' timed out after {self.tool_timeout}s",
                 is_error=True,
                 _tool_name=call.name,
             )
+        logger.info(
+            "tool_call tool=%s ok=%s dur_ms=%d",
+            call.name, not res.is_error, int((time.monotonic() - t0) * 1000),
+        )
+        return res
+
+
+def _is_policy_block(res: ToolResultBlock) -> bool:
+    """True if a tool result is a Warden block (deny / unconfirmed)."""
+    c = res.content
+    return bool(
+        res.is_error
+        and isinstance(c, str)
+        and (c.startswith("Denied by policy") or c.startswith("Requires confirmation"))
+    )
 
 
 def _final_text(content: list[Block]) -> str:

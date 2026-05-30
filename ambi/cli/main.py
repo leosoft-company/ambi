@@ -82,6 +82,13 @@ AMBI_VERIFY_READS=0
 # they get summarized into a single anchor for long-term recall. 0 = off.
 # AMBI_COMPACTION_THRESHOLD=15
 
+# === Observability ===
+# Log level for the `ambi` logger (DEBUG/INFO/WARNING/ERROR). Logs go to
+# ~/.ambi/logs/ambi.log (rotating) and, for `ambi run`, also to stderr.
+# Per-turn telemetry is recorded to ~/.ambi/data/telemetry.db — inspect with
+# `ambi logs` (recent turns) and `ambi status` (health metrics).
+# AMBI_LOG_LEVEL=INFO
+
 # === run_command allowlist ===
 # Comma-separated. Override default if you want a different set.
 # AMBI_RUN_COMMAND_ALLOW=ls,cat,grep,git
@@ -170,6 +177,9 @@ async def _run_chat() -> int:
 
     _load_runtime_env()
     paths.ensure_tree()
+    # REPL: log to file only — stderr would fight the rich Live panel.
+    from ..observability import setup_logging
+    setup_logging(log_dir=paths.logs_dir(), stderr=False)
 
     console = Console()
     # Share the same tasks.db as `ambi run` so schedule() calls from the
@@ -475,6 +485,10 @@ async def _run_daemon() -> int:
 
     _load_runtime_env()
     paths.ensure_tree()
+    # Daemon: log to both the rotating file and stderr so `ambi run` output
+    # shows what the agent is doing (turns, tool calls, warden decisions).
+    from ..observability import setup_logging
+    setup_logging(log_dir=paths.logs_dir(), stderr=True)
 
     if not os.getenv("TELEGRAM_BOT_TOKEN"):
         print(
@@ -491,6 +505,13 @@ async def _run_daemon() -> int:
         await agent.load()
 
         allowed = _parse_allowed_user_ids()
+        if not allowed:
+            print(
+                "⚠ TELEGRAM_ALLOWED_USER_IDS is empty — the bot will accept "
+                "messages from ANYONE who finds it. Set it to your numeric "
+                "Telegram user id before exposing the bot publicly.",
+                file=sys.stderr,
+            )
         delivery_chat_id = next(iter(allowed)) if allowed else None
 
         transport = TelegramTransport(
@@ -498,6 +519,7 @@ async def _run_daemon() -> int:
             bot_token=require_env("TELEGRAM_BOT_TOKEN"),
             allowed_user_ids=allowed,
             task_store=task_store,
+            telemetry_store=agent.telemetry,
         )
 
         async def _deliver_scheduled(task: ScheduledTask, reply: str) -> None:
@@ -695,6 +717,90 @@ async def _render_usage_inline(console) -> None:
     _render_usage_summary(console, "All time", all_time)
 
 
+# ---------------------------------------------------------------------------
+# Observability: `ambi logs` (recent turns) + `ambi status` (health metrics)
+# ---------------------------------------------------------------------------
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Show the most recent agent turns from the telemetry store."""
+    return asyncio.run(_run_logs(args))
+
+
+async def _run_logs(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.table import Table
+
+    from ..observability import TelemetryStore
+
+    limit = getattr(args, "limit", None) or 20
+    rows = await TelemetryStore(paths.telemetry_db()).recent(limit=limit)
+    console = Console()
+    if not rows:
+        console.print("[dim](no turns recorded yet — run a chat or the daemon)[/dim]")
+        return 0
+
+    table = Table(title=f"Last {len(rows)} turns", header_style="bold cyan")
+    for col, just in [
+        ("when", "left"), ("id", "left"), ("trigger", "left"),
+        ("outcome", "center"), ("tools", "right"), ("tok in/out", "right"),
+        ("cost", "right"), ("ms", "right"),
+    ]:
+        table.add_column(col, justify=just)
+    for r in rows:
+        outcome = r["outcome"]
+        colour = {"ok": "green", "error": "red", "max_turns": "yellow"}.get(outcome, "white")
+        when = (r["created_at"] or "")[5:19]  # MM-DD HH:MM:SS
+        flag = " ⚑" if r["sensegate_flagged"] else ""
+        deny = f" ⛔{r['warden_denials']}" if r["warden_denials"] else ""
+        table.add_row(
+            when, r["turn_id"], r["trigger"],
+            f"[{colour}]{outcome}[/{colour}]{flag}{deny}",
+            str(r["num_tool_calls"]),
+            f"{r['input_tokens']}/{r['output_tokens']}",
+            f"${r['cost_usd']:.4f}" if r["cost_usd"] else "—",
+            str(r["duration_ms"]),
+        )
+        if r["error"]:
+            table.add_row("", "", "", f"[red]{r['error'][:80]}[/red]", "", "", "", "")
+    console.print(table)
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show aggregate health metrics over recent turns."""
+    return asyncio.run(_run_status(args))
+
+
+async def _run_status(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from ..observability import TelemetryStore
+
+    s = await TelemetryStore(paths.telemetry_db()).summary()
+    console = Console()
+    if s.turns == 0:
+        console.print("[dim](no turns recorded yet)[/dim]")
+        return 0
+
+    by_trig = ", ".join(f"{k}={v}" for k, v in sorted(s.by_trigger.items())) or "—"
+    body = Text.from_markup(
+        f"[bold]{s.turns}[/bold] recent turns · "
+        f"errors [bold]{s.errors}[/bold] ({s.error_rate:.0%}) · "
+        f"max-turns {s.max_turns_hits}\n"
+        f"latency p50 [bold]{s.p50_ms}ms[/bold] · p95 [bold]{s.p95_ms}ms[/bold]\n"
+        f"tool calls {s.total_tool_calls} · "
+        f"tokens {s.input_tokens}/{s.output_tokens} · "
+        f"cost [bold]${s.cost_usd:.4f}[/bold]\n"
+        f"by trigger: {by_trig}"
+    )
+    border = "red" if s.error_rate > 0.2 else "cyan"
+    console.print(Panel(body, title="ambi status", border_style=border, padding=(0, 1)))
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     """Run behavioral scenarios under evals/scenarios/ and report pass/fail."""
     return asyncio.run(_run_evals(args))
@@ -714,6 +820,8 @@ async def _run_evals(args: argparse.Namespace) -> int:
 
     _load_runtime_env()
     paths.ensure_tree()
+    from ..observability import setup_logging
+    setup_logging(log_dir=paths.logs_dir(), stderr=True)
 
     # Default to repo-relative evals/scenarios; allow override.
     scenarios_dir = _Path(args.path) if args.path else _Path("evals/scenarios")
@@ -873,6 +981,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run", help="start the Telegram bot + scheduler daemon").set_defaults(func=cmd_run)
     sub.add_parser("chat", help="local REPL against the same session").set_defaults(func=cmd_chat)
     sub.add_parser("usage", help="show token + cost summary").set_defaults(func=cmd_usage)
+    logs_parser = sub.add_parser("logs", help="show recent agent turns (telemetry)")
+    logs_parser.add_argument("-n", "--limit", type=int, default=20,
+                             help="how many recent turns to show (default 20)")
+    logs_parser.set_defaults(func=cmd_logs)
+    sub.add_parser("status", help="aggregate health metrics over recent turns").set_defaults(func=cmd_status)
     eval_parser = sub.add_parser("eval", help="run behavioral scenarios in evals/")
     eval_parser.add_argument("path", nargs="?", default=None,
                              help="scenario file or directory (default: evals/scenarios)")

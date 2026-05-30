@@ -1,7 +1,7 @@
 [project]
 name = "ambi-core"
 version = "0.1.0"
-description = "A provider-agnostic personal-agent harness — agent loop, first-class skills, action verification (SenseGate), MCP tool integration, scheduling, and Telegram transport."
+description = "A personal-agent harness with a pluggable provider seam (Gemini adapter shipped) — agent loop, first-class skills, action verification (SenseGate), MCP tool integration, scheduling, and Telegram transport."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }

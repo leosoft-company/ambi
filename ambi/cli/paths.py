@@ -55,11 +55,19 @@ def usage_db() -> Path:
     return data_dir() / "usage.db"
 
 
+def telemetry_db() -> Path:
+    return data_dir() / "telemetry.db"
+
+
+def logs_dir() -> Path:
+    return ambi_home() / "logs"
+
+
 def hippocamp_log() -> Path:
     return data_dir() / "hippocamp.log"
 
 
 def ensure_tree() -> None:
-    """Make ambi_home, skills/, and data/ if missing. Idempotent."""
-    for d in (ambi_home(), skills_dir(), data_dir()):
+    """Make ambi_home, skills/, data/, and logs/ if missing. Idempotent."""
+    for d in (ambi_home(), skills_dir(), data_dir(), logs_dir()):
         d.mkdir(parents=True, exist_ok=True)

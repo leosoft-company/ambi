@@ -62,6 +62,11 @@ class SqliteStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
+            # WAL lets readers and a single writer proceed concurrently —
+            # fewer "database is locked" errors when chat, scheduler, and
+            # usage tracking touch SQLite around the same time. Persists on
+            # the DB file once set (no-op for :memory:).
+            await db.execute("PRAGMA journal_mode=WAL")
             await db.executescript(_SCHEMA)
             await db.commit()
         self._initialized = True
