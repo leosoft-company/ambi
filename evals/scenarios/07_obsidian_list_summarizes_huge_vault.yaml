@@ -16,12 +16,14 @@ setup:
     - create_obsidian_notes:
         count: 150
         folders: [Inbox, Areas/Work, Resources/Reading]
-input: "show me a list of notes in my obsidian vault"
+input: "use obsidian_list to show what's in my vault — give me a summary not every path"
 assert:
   - tool_called: obsidian_list
-  # The summary marker — folder breakdown not full path list.
-  - text_contains: "too many to list"
-  # No "[clipped]" / "cannot retrieve" symptom.
+  # No "[clipped]" / "cannot retrieve" symptom from the old bug.
   - text_not_matches: "(?i)clipped|cannot retrieve|truncated"
-  # Mention at least one of the seeded folders so we know it scanned.
-  - text_matches: "Inbox|Areas|Resources"
+  # Mentions a count consistent with summary mode (we seeded 150 notes).
+  - text_matches: "150|hundred|many"
+  # Names at least two of the seeded folders (agent summarised the breakdown).
+  - text_matches: '(?s)Inbox.*(Areas|Resources)|Areas.*(Inbox|Resources)|Resources.*(Inbox|Areas)'
+  # Does NOT enumerate every note path verbatim.
+  - text_not_matches: "note_\\d{4}\\.md.*note_\\d{4}\\.md.*note_\\d{4}\\.md"

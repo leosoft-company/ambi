@@ -681,25 +681,33 @@ async def _run_evals(args: argparse.Namespace) -> int:
         )
     )
 
+    # Allow up to 2 retries per scenario on transient flakes (Gemini
+    # sometimes emits an empty stream). Real regressions still fail
+    # because they fail on every attempt.
+    max_attempts = int(os.environ.get("AMBI_EVAL_MAX_ATTEMPTS", "2"))
+
     results = []
     for scenario in scenarios:
-        # Apply scenario setup (env overrides, prepare actions) first so
-        # build_agent picks up the overrides. Setup is cleaned up after the
-        # scenario completes.
-        with apply_scenario_setup(scenario):
-            agent = build_agent(
-                extra_tools=[], with_hippocamp=False, task_store=None,
-            )
-            try:
-                result = await run_scenario(scenario, agent)
-            except Exception as e:
-                from ..evals import ScenarioResult
-                result = ScenarioResult(
-                    scenario=scenario, response_text="",
-                    tools_called=[], input_tokens=0, output_tokens=0,
-                    cost_usd=0.0, error=f"{type(e).__name__}: {e}",
-                    assertion_results=[],
+        result = None
+        for attempt in range(1, max_attempts + 1):
+            with apply_scenario_setup(scenario):
+                agent = build_agent(
+                    extra_tools=[], with_hippocamp=False, task_store=None,
                 )
+                try:
+                    result = await run_scenario(scenario, agent)
+                except Exception as e:
+                    from ..evals import ScenarioResult
+                    result = ScenarioResult(
+                        scenario=scenario, response_text="",
+                        tools_called=[], input_tokens=0, output_tokens=0,
+                        cost_usd=0.0, error=f"{type(e).__name__}: {e}",
+                        assertion_results=[],
+                    )
+            # Pass or has visible content → done. Empty replies on first
+            # attempt are usually flake — try again.
+            if result.passed or result.response_text.strip() or attempt == max_attempts:
+                break
         results.append(result)
         _print_scenario_result(console, result)
 
