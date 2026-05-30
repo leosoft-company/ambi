@@ -206,7 +206,8 @@ async def test_provider_exception_rolls_back_history():
             raise RuntimeError("network down")
 
         async def stream(self, *a, **kw):
-            raise NotImplementedError
+            raise RuntimeError("network down")
+            yield  # unreachable — makes this an async generator
 
     agent = Agent(provider=BoomProvider(), tools=tools, system="s")
     # Seed some history from a successful prior chat.
@@ -527,7 +528,13 @@ async def test_store_does_not_persist_on_chat_failure(tmp_path):
             raise RuntimeError("provider blew up")
 
         async def stream(self, *a, **kw):
-            raise NotImplementedError
+            # Mirror complete(): first turn succeeds, later turns blow up.
+            self.calls += 1
+            if self.calls == 1:
+                yield TextChunk(text="ok")
+                yield StreamEnd(stop_reason="end_turn")
+                return
+            raise RuntimeError("provider blew up")
 
     agent = Agent(
         provider=FlakyProvider(), tools=ToolRegistry(), system="s",
@@ -818,6 +825,70 @@ async def test_compaction_triggers_when_threshold_reached():
     # messages between them).
     assert a.from_seq == 0
     assert a.to_seq >= 5  # 3 user + 3 assistant minimum
+
+
+async def test_compaction_skips_empty_summary_no_history_drop():
+    """If the summarizer returns blank, no anchor is created — the messages
+    stay verbatim instead of being hidden behind an empty summary."""
+    # 6 turns of normal replies, then a BLANK summary response for _compact.
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("r")], stop_reason="end_turn") for _ in range(6)]
+        + [CompletionResult(content=[TextBlock("   ")], stop_reason="end_turn")]
+    )
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        context_window_turns=2, compaction_threshold=3,
+    )
+    for i in range(6):
+        await agent.chat(f"turn {i}")
+    await agent._compact()
+
+    assert agent.anchors == []  # blank summary → no anchor
+    # Nothing is hidden: every stored message is still reachable in the view
+    # (no covered range), so old turns aren't silently dropped.
+    view = agent._context_view()
+    assert not any("compacted summary" in b.text
+                   for m in view for b in m.content if isinstance(b, TextBlock))
+
+
+async def test_context_view_ignores_blank_summary_anchor():
+    """A blank-summary anchor on disk must not hide its messages."""
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("ok")], stop_reason="end_turn")]
+    )
+    # Wide window so all turns would be in view — the only thing that could
+    # hide u0/a0 is the anchor, which we want ignored.
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        context_window_turns=10, compaction_threshold=0,
+    )
+    for i in range(3):
+        agent.messages.append(Message("user", [TextBlock(f"u{i}")]))
+        agent.messages.append(Message("assistant", [TextBlock(f"a{i}")]))
+    # Corrupt/legacy anchor with an empty summary covering u0..a1.
+    agent.anchors.append(CompactionAnchor(from_seq=0, to_seq=3, summary="  "))
+
+    view = agent._context_view()
+    texts = [b.text for m in view for b in m.content if isinstance(b, TextBlock)]
+    # The blank anchor is ignored — no synthetic summary line…
+    assert not any("compacted summary" in t for t in texts)
+    # …and the messages it claimed to cover are not forced out of view by it.
+    assert "u0" in texts and "a0" in texts
+
+
+async def test_next_compaction_range_none_below_threshold():
+    """Exactly threshold-1 eligible turns must not trigger compaction."""
+    provider = MockProvider(
+        [CompletionResult(content=[TextBlock("r")], stop_reason="end_turn") for _ in range(3)]
+    )
+    agent = Agent(
+        provider=provider, tools=ToolRegistry(), system="s",
+        context_window_turns=1, compaction_threshold=3,
+    )
+    for i in range(3):
+        await agent.chat(f"t{i}")
+    # 3 turns, window keeps 1, so only 2 are out-of-window — below threshold 3.
+    assert agent._next_compaction_range() is None
 
 
 async def test_context_view_folds_anchor_in():

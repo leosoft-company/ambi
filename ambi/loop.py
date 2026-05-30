@@ -124,66 +124,20 @@ class Agent:
         self.anchors = await self.store.load_anchors(self.session_id)
 
     async def chat(self, user_input: str, max_turns: int = 20) -> str:
-        async with self._chat_lock:
-            text = await self._chat_locked(user_input, max_turns)
-        await self._maybe_compact_in_background()
-        return text
+        """Non-streaming wrapper over chat_stream().
 
-    async def _chat_locked(self, user_input: str, max_turns: int) -> str:
-        snapshot = len(self.messages)
-        self.messages.append(Message("user", [TextBlock(user_input)]))
-
-        invocations: list[ToolInvocation] = []
-        retries_left = self.sensegate.max_retries if self.sensegate else 0
-
-        try:
-            for _ in range(max_turns):
-                result = await self.provider.complete(
-                    self._context_view(),
-                    self.tools.defs(),
-                    system=self.system,
-                    max_tokens=self.max_tokens,
-                    **self.provider_kwargs,
-                )
-                self.messages.append(Message("assistant", result.content))
-
-                if result.stop_reason != "tool_use":
-                    final_text = _final_text(result.content)
-
-                    if self.sensegate is not None:
-                        verdict = await self.sensegate.check(final_text, invocations)
-                        if not verdict.matches:
-                            has_write = any(
-                                inv.kind == "write" for inv in invocations
-                            )
-                            if has_write and retries_left > 0:
-                                self.messages.append(
-                                    correction_message(verdict.reason)
-                                )
-                                retries_left -= 1
-                                continue
-
-                    await self._persist_new()
-                    return final_text
-
-                calls = [b for b in result.content if isinstance(b, ToolUseBlock)]
-                results = await asyncio.gather(
-                    *(self._invoke_with_timeout(c) for c in calls)
-                )
-                for call, res in zip(calls, results):
-                    res.tool_use_id = call.id
-                    invocations.append(
-                        ToolInvocation(
-                            call=call, result=res, kind=self.tools.kind(call.name)
-                        )
-                    )
-                self.messages.append(Message("user", list(results)))
-        except BaseException:
-            del self.messages[snapshot:]
-            raise
-
-        del self.messages[snapshot:]
-        raise MaxTurnsExceeded(max_turns)
+        Drains the event stream and returns the final reply text. There is no
+        separate non-streaming loop: locking, persistence, rollback, SenseGate,
+        Warden, and the compaction trigger all live in chat_stream(), so the
+        agent turn loop — the critical path — has exactly one implementation
+        to keep correct. Raises MaxTurnsExceeded / propagates provider errors
+        identically (the generator re-raises them through iteration).
+        """
+        final_text = ""
+        async for ev in self.chat_stream(user_input, max_turns):
+            if isinstance(ev, ChatComplete):
+                final_text = ev.final_text
+        return final_text
 
     async def chat_stream(
         self, user_input: str, max_turns: int = 20
@@ -360,15 +314,19 @@ class Agent:
         turns that aren't covered by an anchor. Long blocks are clipped on a
         copy — original storage is never mutated.
         """
+        # Only anchors with a real summary may hide their messages. A
+        # blank-summary anchor (e.g. a corrupt/legacy row on disk) is ignored
+        # so its covered messages stay verbatim rather than vanishing.
+        valid_anchors = [a for a in self.anchors if a.summary.strip()]
         covered: set[int] = set()
-        for a in self.anchors:
+        for a in valid_anchors:
             for seq in range(a.from_seq, a.to_seq + 1):
                 covered.add(seq)
 
         cutoff = self._find_window_cutoff(covered)
 
         out: list[Message] = []
-        for a in sorted(self.anchors, key=lambda x: x.from_seq):
+        for a in sorted(valid_anchors, key=lambda x: x.from_seq):
             out.append(
                 Message(
                     "user",
@@ -500,8 +458,15 @@ class Agent:
                 summary = await self._summarize_segment(segment)
             except Exception:
                 return  # leave for next attempt; never crash the chat path
+            # Guard: a created anchor *hides* its covered messages from the
+            # model (they're replaced by the summary in _context_view). An
+            # empty/blank summary would therefore silently drop that history.
+            # Refuse to anchor on a useless summary — leave the messages
+            # verbatim and retry on a later turn.
+            if not summary.strip():
+                return
             anchor = CompactionAnchor(
-                from_seq=from_seq, to_seq=to_seq, summary=summary,
+                from_seq=from_seq, to_seq=to_seq, summary=summary.strip(),
             )
             self.anchors.append(anchor)
             if self.store is not None:
