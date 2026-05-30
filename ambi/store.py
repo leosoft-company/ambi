@@ -26,6 +26,25 @@ from .types import (
 )
 
 
+async def enable_wal(db) -> None:
+    """Best-effort WAL journal mode + a busy timeout on an open connection.
+
+    WAL lets readers and a single writer proceed concurrently — fewer
+    "database is locked" errors when chat, scheduler, and usage tracking touch
+    SQLite at once. But switching *into* WAL needs a brief exclusive lock and
+    returns SQLITE_BUSY immediately if another connection has the file open
+    (common at daemon startup). So this is best-effort and never fatal:
+    rollback-journal mode is fully correct, just less concurrent, and the
+    busy_timeout gives the transition a chance to wait out short-lived
+    connections. WAL, once set, persists on the file.
+    """
+    try:
+        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL DEFAULT 'default',
@@ -62,11 +81,7 @@ class SqliteStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
-            # WAL lets readers and a single writer proceed concurrently —
-            # fewer "database is locked" errors when chat, scheduler, and
-            # usage tracking touch SQLite around the same time. Persists on
-            # the DB file once set (no-op for :memory:).
-            await db.execute("PRAGMA journal_mode=WAL")
+            await enable_wal(db)
             await db.executescript(_SCHEMA)
             await db.commit()
         self._initialized = True

@@ -28,6 +28,7 @@ from typing import Awaitable, Callable
 import aiosqlite
 from croniter import croniter
 
+from .store import enable_wal
 from .tool import Tool
 from .types import ToolDef
 
@@ -111,7 +112,7 @@ class TaskStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
-            await db.execute("PRAGMA journal_mode=WAL")  # concurrent reads/writes
+            await enable_wal(db)
             await db.executescript(_SCHEMA)
             await db.commit()
         self._initialized = True

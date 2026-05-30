@@ -1,11 +1,38 @@
+import aiosqlite
 import pytest
 
-from ambi.store import SqliteStore
+from ambi.store import SqliteStore, enable_wal
 from ambi.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
 
 def _msg(role, *blocks):
     return Message(role=role, content=list(blocks))
+
+
+async def test_ensure_survives_concurrent_connection(tmp_path):
+    """Regression: switching into WAL needs an exclusive lock and returns
+    SQLITE_BUSY if another connection is open (the daemon startup race that
+    crashed `ambi run`). enable_wal must be best-effort, never fatal."""
+    db = tmp_path / "session.db"
+    holder = await aiosqlite.connect(str(db))
+    try:
+        await holder.execute("CREATE TABLE IF NOT EXISTS probe(a)")
+        await holder.commit()
+        await holder.execute("BEGIN")  # active txn blocks the WAL switch
+        store = SqliteStore(db)
+        await store._ensure()            # must NOT raise "database is locked"
+        await store.append([_msg("user", TextBlock("hi"))])
+        assert len(await store.load()) == 1
+    finally:
+        await holder.close()
+
+
+async def test_enable_wal_is_best_effort_on_error():
+    class _Boom:
+        async def execute(self, *a):
+            raise RuntimeError("locked")
+
+    await enable_wal(_Boom())  # swallows — never raises
 
 
 async def test_empty_load_returns_empty(tmp_path):
