@@ -85,6 +85,12 @@ AMBI_VERIFY_READS=0
 # === run_command allowlist ===
 # Comma-separated. Override default if you want a different set.
 # AMBI_RUN_COMMAND_ALLOW=ls,cat,grep,git
+
+# === Egress allowlist ===
+# Hosts run_command may push/clone to. Defaults to github.com, gitlab.com,
+# bitbucket.org; pushes/remotes to any other host are denied. Add your own
+# (e.g. self-hosted git) here, comma-separated.
+# AMBI_ALLOWED_GIT_HOSTS=git.mycompany.com
 """
 
 
@@ -197,6 +203,12 @@ async def _run_chat() -> int:
 
     agent, hippo_cm = await _build_with_optional_hippocamp()
 
+    # Human-in-the-loop confirmer for Warden require_confirmation verdicts
+    # (egress: git push, new remotes, …). The Live panel handle is injected
+    # per-turn via this holder so the confirmer can pause it to read stdin.
+    live_holder: dict[str, object] = {"live": None}
+    agent.confirm = _make_confirmer(console, live_holder)
+
     async def _close_hippo():
         if hippo_cm is not None:
             await hippo_cm.__aexit__(None, None, None)
@@ -251,7 +263,7 @@ async def _run_chat() -> int:
 
             snapshot = len(agent.messages)
             try:
-                await _stream_turn(console, agent, user_input)
+                await _stream_turn(console, agent, user_input, live_holder)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 del agent.messages[snapshot:]
                 console.print("[dim italic](cancelled)[/dim italic]")
@@ -265,7 +277,37 @@ async def _run_chat() -> int:
         await _close_hippo()
 
 
-async def _stream_turn(console, agent, user_input: str) -> None:
+def _make_confirmer(console, live_holder: dict):
+    """Build an interactive y/N confirmer for Warden require_confirmation.
+
+    Pauses the active Live panel (if any) so the prompt reads cleanly from
+    stdin, then resumes. Anything other than an explicit yes is a decline —
+    the loop fails closed.
+    """
+
+    async def confirm(ctx, decision) -> bool:
+        live = live_holder.get("live")
+        if live is not None:
+            live.stop()
+        try:
+            console.print(
+                f"\n[bold yellow]⚠ confirm[/bold yellow] "
+                f"[cyan]{ctx.tool_name}[/cyan] — {decision.reason}"
+            )
+            console.print(f"  [dim]{_short_args(ctx.tool_input, 200)}[/dim]")
+            try:
+                answer = console.input("  Allow this action? [y/N] ")
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+        finally:
+            if live is not None:
+                live.start()
+        return answer.strip().lower() in {"y", "yes"}
+
+    return confirm
+
+
+async def _stream_turn(console, agent, user_input: str, live_holder=None) -> None:
     """Drive agent.chat_stream() through a rich Live panel."""
     from rich.live import Live
     from rich.markdown import Markdown
@@ -296,6 +338,8 @@ async def _stream_turn(console, agent, user_input: str) -> None:
         )
 
     with Live(panel(), console=console, refresh_per_second=12, transient=False) as live:
+        if live_holder is not None:
+            live_holder["live"] = live
         async for ev in agent.chat_stream(user_input):
             if isinstance(ev, TextDelta):
                 buffer += ev.text

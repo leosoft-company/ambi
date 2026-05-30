@@ -22,9 +22,11 @@ Built as the runtime half of a personal-AI stack. Pair it with Hippocamp for lon
 | Context window   | Sliding window over user-text turns + per-block clipping. Storage stays full-fidelity; only the LLM slice is trimmed. |
 | Persistence      | SQLite-backed session via `SqliteStore`. Load on startup, append on each successful `chat()`. |
 | SenseGate        | Post-turn LLM judge that compares the assistant's prose against actual tool results. Block-and-retry on writes; flag-only on reads. Configurable. |
+| Warden           | Pre-execution authorization. Ordered policies (deny / require-confirmation / allow) gate every tool call: argv validators, egress host allowlist, human-confirmation on outbound actions, cost ceiling. Audited. |
+| Injection defense | Tool outputs wrapped in a `<tool_output trust="data">` envelope + sanitized (invisible-char / Unicode-smuggling / marker stripping) before the model, verifier, or summarizer sees them. See [SECURITY.md](SECURITY.md). |
 | Scheduling       | Cron + one-shot `schedule()` tool the agent can call itself. Fires via `agent.chat()` so scheduled runs use the same tools and skills. |
 | MCP integration  | `McpServer` + `mcp_tools()` wrap any stdio MCP server as ambi `Tool`s. Hippocamp ships as a worked example. |
-| Run-command      | Allowlisted external commands via `make_run_command_tool(CommandPolicy)`. Argv-only (no shell), cwd jail, timeout, output cap. |
+| Run-command      | Allowlisted external commands via `make_run_command_tool(CommandPolicy)`. Argv-only (no shell), cwd jail, timeout, output cap, forbidden-arg + secret-path denylists. |
 | Transports       | `TelegramTransport` — polling, allowlist auth, typing indicator, message splitting, reply-context extraction, `/scheduled` command. |
 
 ## Setup (fresh machine)
@@ -176,10 +178,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component graph, runtime sequence, th
 caller ─► Agent ─► LLMProvider (Protocol) ─► GoogleProvider ─► Gemini
             │
             ├─► ToolRegistry  (user tools + load_skill / scheduler / MCP / skill-bundled tools)
+            ├─► Warden        (pre-execution authorization — deny / confirm / allow, audited)
             ├─► SkillRegistry (bundled ambi/skills/* + user ~/.ambi/skills/* — catalog in system prompt)
             ├─► SenseGate     (post-turn claim verifier, block-and-retry on writes)
             └─► SqliteStore   (durable session)
 ```
+
+Tool results are wrapped in a `<tool_output trust="data">` envelope and sanitized before the model sees them; the Warden authorizes every tool call before it runs. See **[SECURITY.md](SECURITY.md)** for the full threat model.
 
 ## Adding more LLM providers
 
@@ -257,25 +262,36 @@ def register(tools: ToolRegistry) -> None:
 
 See [ARCHITECTURE.md § Skills](ARCHITECTURE.md#skills--progressive-disclosure-as-self-contained-packages) for the full design rationale (advisory-vs-authoritative, registration ordering, override precedence).
 
-## Trust model
+## Security
 
 This is real-execution software running real tools on your machine. The
-defaults are personal-use defaults, not multi-tenant production defaults.
+defaults are personal-use defaults, not multi-tenant production defaults. The
+primary threat is **prompt injection via tool output** (a poisoned page or
+MCP response trying to hijack the agent), and the design assumes the model
+*can* be hijacked — so enforcement lives in the tool layer, not in prompts.
 
-- **`run_command`** controls *binaries*, not arguments. Allowlisting `git`
-  permits `git push --force`. Tighten by argv validators if your threat
-  model needs it.
-- **MCP servers** (including Hippocamp) run as subprocesses inheriting your
-  shell environment and credentials. Treat each MCP server you wire in as
-  trusted code.
-- **Skills** are advisory, not authoritative. They describe *how* to use
-  capabilities; they do not enforce *what is allowed*. Enforcement lives
-  in the tool layer.
-- **Telegram transport** defaults to `TELEGRAM_ALLOWED_USER_IDS` empty,
-  which means "allow everyone." Set it to your numeric user ID before
-  exposing the bot publicly.
-- **SenseGate** is a best-effort LLM judge, not a guarantee. It catches
-  classes of action-hallucination — it does not catch arbitrary lies.
+Two kinds of defense, layered:
+
+- **Reduce the odds (soft).** Tool results are wrapped in a
+  `<tool_output trust="data">` envelope and sanitized (invisible-char /
+  Unicode-smuggling / injection-marker stripping) before the model — and the
+  SenseGate verifier and compaction summarizer — see them.
+- **Cap the blast radius (hard).** The **Warden** authorizes every tool call
+  before it runs (deny / require-confirmation / allow, audited). Defaults:
+  destructive-argv denial, an **egress host allowlist** (exfil cut),
+  **human-confirmation** on outbound actions (fail-closed if no confirmer),
+  and a daily cost ceiling. `run_command` adds an argv[0] allowlist,
+  forbidden-arg blocking (`-exec`/`-delete`), and a **secret-path denylist**
+  (`.env`, `~/.ssh`, …).
+
+Other notes: **MCP servers** and installed tool code run as trusted
+subprocesses inheriting your environment — vet what you wire in. **Skills**
+are advisory, not authoritative. **Telegram** defaults to
+`TELEGRAM_ALLOWED_USER_IDS` empty (= allow everyone) — set it before exposing
+the bot.
+
+**See [SECURITY.md](SECURITY.md) for the full threat model, configuration
+knobs, and the residual gaps we have *not* solved.**
 
 ## Hippocamp companion
 
@@ -322,9 +338,10 @@ ambi/
       SKILL.md          prose guidance
       tools.py          implementation + register() entry point
   sensegate.py        Post-turn action verifier (LLM judge + audit log)
+  warden.py           Pre-execution authorization policies (deny/confirm/allow)
   scheduler.py        TaskStore + Scheduler + schedule()/list/cancel tools
   store.py            SqliteStore (durable session persistence)
-  run_command.py      Allowlisted external commands
+  run_command.py      Allowlisted external commands (+ forbidden-arg / secret-path denylists)
   mcp.py              McpServer + mcp_tools() wrapper
   integrations/
     hippocamp.py        MCP server wrapper for Hippocamp memory
@@ -333,7 +350,7 @@ ambi/
   cli/                `ambi` subcommands: init / run / chat / version
     system.md           bundled default personality
 examples/             Raw library API demos (repl.py, telegram_bot.py)
-tests/                pytest, asyncio-mode auto (180 unit + 3 live smoke)
+tests/                pytest, asyncio-mode auto (305 unit + 3 live smoke)
 docs/                 Demo SVG + render script
 ```
 

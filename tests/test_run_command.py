@@ -24,6 +24,77 @@ async def test_command_not_in_allowlist():
     assert "git" in result  # surfaces the allowed list
 
 
+async def test_forbidden_arg_exec_blocked():
+    """An allowlisted command may not use -exec to launch another binary."""
+    tool = make_run_command_tool(CommandPolicy(allowed={"find"}))
+    result = await tool.handler(
+        {"argv": ["find", ".", "-name", "x", "-exec", "sh", "-c", "id", ";"]}
+    )
+    assert "forbidden" in result
+    assert "-exec" in result
+
+
+async def test_forbidden_arg_delete_blocked():
+    tool = make_run_command_tool(CommandPolicy(allowed={"find"}))
+    result = await tool.handler({"argv": ["find", ".", "-delete"]})
+    assert "forbidden" in result
+
+
+async def test_forbidden_args_configurable_off():
+    """Empty forbidden set restores the old permissive behaviour (still
+    allowlist-gated). Uses echo so nothing destructive runs."""
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={"echo"}, forbidden_args=frozenset())
+    )
+    result = await tool.handler({"argv": ["echo", "-exec"]})
+    assert "forbidden" not in result
+    assert "exit_code: 0" in result
+
+
+async def test_denied_path_env_blocked():
+    tool = make_run_command_tool(CommandPolicy(allowed={"cat"}))
+    result = await tool.handler({"argv": ["cat", ".env"]})
+    assert "sensitive path" in result
+    assert "blocked" in result
+
+
+async def test_denied_path_dotenv_variant_blocked():
+    tool = make_run_command_tool(CommandPolicy(allowed={"cat"}))
+    assert "blocked" in await tool.handler({"argv": ["cat", ".env.local"]})
+
+
+async def test_denied_path_ssh_key_absolute_blocked():
+    tool = make_run_command_tool(CommandPolicy(allowed={"cat"}))
+    result = await tool.handler({"argv": ["cat", "/home/u/.ssh/id_rsa"]})
+    assert "blocked" in result
+
+
+async def test_denied_path_exempts_safe_template_suffix():
+    """`.env.example` is a committed template, not a secret — allow it."""
+    tool = make_run_command_tool(CommandPolicy(allowed={"cat"}))
+    result = await tool.handler({"argv": ["cat", "/no/such/dir/.env.example"]})
+    # Passes the denylist; fails later only because the file doesn't exist.
+    assert "sensitive path" not in result
+
+
+async def test_denied_path_relative_resolves_against_cwd(tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("SECRET=1")
+    tool = make_run_command_tool(CommandPolicy(allowed={"cat"}))
+    # Relative token resolved against the provided cwd must still be caught.
+    result = await tool.handler({"argv": ["cat", ".env"], "cwd": str(tmp_path)})
+    assert "blocked" in result
+
+
+async def test_denied_paths_configurable_off():
+    tool = make_run_command_tool(
+        CommandPolicy(allowed={"cat"}, denied_path_patterns=frozenset())
+    )
+    # Denylist disabled — reaches exec and fails on missing file, not policy.
+    result = await tool.handler({"argv": ["cat", "/no/such/.env"]})
+    assert "sensitive path" not in result
+
+
 async def test_allowlist_matches_basename():
     tool = make_run_command_tool(CommandPolicy(allowed={"python3"}))
     # Even with absolute path, basename "python3" should be checked.

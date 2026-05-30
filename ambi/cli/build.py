@@ -32,8 +32,13 @@ DEFAULT_MODEL = "gemini-2.5-flash"
 
 # Read-mostly default allowlist for run_command. Users tighten/extend via
 # the AMBI_RUN_COMMAND_ALLOW env var (comma-separated).
+#
+# `find` is deliberately NOT here: `find … -exec` launches arbitrary binaries,
+# which defeats the argv[0] allowlist entirely (a hijacked agent could run any
+# command). run_command also blocks the -exec/-delete arg family as a second
+# layer, but keeping find out of the default set is the cleaner cut.
 DEFAULT_COMMAND_ALLOWLIST = {
-    "ls", "pwd", "cat", "head", "tail", "wc", "find",
+    "ls", "pwd", "cat", "head", "tail", "wc",
     "git", "date", "echo", "grep",
 }
 
@@ -69,6 +74,14 @@ async def _get_current_time(args: dict) -> str:
     except Exception:
         return f"Error: unknown timezone '{tz_name}'"
     return datetime.now(tz).strftime("%A %Y-%m-%d %H:%M:%S %Z")
+
+
+def _system_time_suffix() -> str:
+    """Fresh per-turn timestamp appended to the system prompt so the model
+    always knows the current local time (e.g. for time-of-day greetings).
+    """
+    now = datetime.now().astimezone()
+    return f"Current local time: {now.strftime('%A %Y-%m-%d %H:%M %Z')}"
 
 
 def _time_tool() -> Tool:
@@ -157,10 +170,24 @@ def build_agent(
 
     # Warden: pre-execution policy enforcement. Defaults are conservative:
     #   - ArgvValidator blocks the truly destructive run_command argv shapes.
+    #   - RequireConfirmation gates egress (git push / new remotes) on human
+    #     approval. With no confirmer wired (the daemon) it fails closed —
+    #     this is the structural cap on prompt-injection blast radius.
     #   - CostCeiling caps daily spend (uses the same UsageStore we already
     #     wired for token tracking).
     # No QuietHoursPolicy by default — opt in via env if you want it.
-    from ..warden import ArgvValidatorPolicy, CostCeilingPolicy, Warden
+    from ..warden import (
+        ArgvValidatorPolicy,
+        CostCeilingPolicy,
+        RequireConfirmationPolicy,
+        UrlAllowlistPolicy,
+        Warden,
+    )
+    # Hosts run_command may push/clone to. Override/extend with
+    # AMBI_ALLOWED_GIT_HOSTS (comma-separated) for self-hosted git.
+    allowed_hosts = {"github.com", "gitlab.com", "bitbucket.org"}
+    extra_hosts = os.getenv("AMBI_ALLOWED_GIT_HOSTS", "")
+    allowed_hosts |= {h.strip() for h in extra_hosts.split(",") if h.strip()}
     warden = Warden(policies=[
         ArgvValidatorPolicy(forbid=[
             "git push --force",
@@ -169,6 +196,14 @@ def build_agent(
             "rm -rf /",
             "rm -rf ~",
             "rm -rf $HOME",
+        ]),
+        # Hard-deny egress to unknown hosts (exfil channel) before we even
+        # reach the confirmation gate below.
+        UrlAllowlistPolicy(allowed_hosts=allowed_hosts),
+        RequireConfirmationPolicy(argv_patterns=[
+            "git push",
+            "git remote add",
+            "git remote set-url",
         ]),
         CostCeilingPolicy(
             usage_store=usage_store,
@@ -199,4 +234,5 @@ def build_agent(
                 thinking_budget=main_thinking_budget,
             ),
         },
+        system_suffix_fn=_system_time_suffix,
     )

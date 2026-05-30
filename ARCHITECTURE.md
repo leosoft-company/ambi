@@ -19,9 +19,10 @@ ambi-core/
 │   ├── providers/google.py         # Gemini adapter (google-genai)
 │   ├── loop.py                     # Agent (chat + chat_stream), MaxTurnsExceeded
 │   ├── sensegate.py                # post-turn claim verifier (LLM judge + audit log)
+│   ├── warden.py                   # pre-execution authorization policies (deny/confirm/allow)
 │   ├── scheduler.py                # TaskStore + Scheduler + schedule()/list/cancel tools
 │   ├── store.py                    # SqliteStore (durable session)
-│   ├── run_command.py              # allowlisted external commands
+│   ├── run_command.py              # allowlisted external commands (+ forbidden-arg / secret-path denylists)
 │   ├── mcp.py                      # McpServer + mcp_tools() — wrap any stdio MCP server
 │   ├── env.py                      # load_env, require_env
 │   ├── integrations/
@@ -35,7 +36,7 @@ ambi-core/
 │       ├── system.md               # bundled default personality
 │       └── system_hippocamp.md     # appended when AMBI_USE_HIPPOCAMP=1
 ├── examples/                       # raw library API demos (repl.py, telegram_bot.py)
-├── tests/                          # pytest, asyncio-mode auto (180 unit + 3 live smoke)
+├── tests/                          # pytest, asyncio-mode auto (305 unit + 3 live smoke)
 ├── docs/                           # demo SVG + render script
 └── pyproject.toml                  # hatchling build, ambi script + [hippocamp] extra
 ```
@@ -55,22 +56,26 @@ ambi-core/
        │  - system         (personality + skill catalog)      │
        │  - chat() loop:                                      │
        │      provider.complete/stream → assistant blocks     │
+       │      warden.authorize(call)  → deny / confirm / allow │
        │      gather(tools.invoke(c) for c in tool_use)       │
+       │      wrap results in <tool_output trust="data"> view │
        │      sensegate.check(final_text, invocations)        │
        │      block-and-retry on writes / flag-only on reads  │
-       └──┬───────┬──────┬───────┬──────────┬───────┬─────────┘
-          │       │      │       │          │       │
-          ▼       ▼      ▼       ▼          ▼       ▼
-     ToolRegistry │   provider  SkillRegistry  SenseGate  SqliteStore
-                  │      │         │              │           │
-                  │      ▼         ▼              ▼           ▼
-                  │  GoogleProvider  catalog +   LLM judge   messages
-                  │      │           load_skill  + audit_log + tasks
-                  │      ▼
-              (handlers) Gemini API
+       └──┬─────┬──────┬──────┬─────────┬───────┬───────┬─────┘
+          │     │      │      │         │       │       │
+          ▼     ▼      ▼      ▼         ▼       ▼       ▼
+     ToolRegistry │  Warden provider SkillRegistry SenseGate SqliteStore
+                  │    │      │         │            │          │
+                  │    ▼      ▼         ▼            ▼          ▼
+                  │  policies GoogleP. catalog +   LLM judge  messages
+                  │  +audit    │       load_skill  + audit    + tasks
+                  │            ▼
+              (handlers)  Gemini API
 ```
 
 The streaming variant (`Agent.chat_stream`) yields events of types `TextDelta`, `ToolUseEvent`, `ToolResultEvent`, `SenseGateFlagEvent`, `ChatComplete` — same loop semantics, same persistence, same rollback. The Telegram transport edits a placeholder message progressively as text arrives; the REPL uses rich `Live` to update the panel.
+
+Before any tool handler runs, `Agent._invoke_with_timeout` asks the Warden to authorize the call; a `deny` (or unconfirmed `require_confirmation`) becomes an error `ToolResultBlock` the model sees instead of execution. Tool results are wrapped in a sanitized `<tool_output trust="data">` envelope in the LLM-facing context view (see *Security* below).
 
 ## Provider seam
 
@@ -131,7 +136,7 @@ Runtime flow: model sees the catalog in the system prompt → picks a skill → 
 
 ### Authoring conventions
 
-Skills are **advisory** (prose the model reads), not authoritative. Authorization lives in the tool layer (`CommandPolicy`, MCP transport, etc.). Skills describe *how and when* to use capabilities; they don't enforce *what is allowed*. See the module docstring in `ambi/skills/__init__.py` for the full guidance with ✅/❌ examples.
+Skills are **advisory** (prose the model reads), not authoritative. Authorization lives in the tool layer (`CommandPolicy`, the Warden, MCP transport, etc.). Skills describe *how and when* to use capabilities; they don't enforce *what is allowed*. See the module docstring in `ambi/skills/__init__.py` for the full guidance with ✅/❌ examples.
 
 ## Extending — adding a new skill
 
@@ -211,6 +216,27 @@ After every turn that involved tool calls, `Agent.chat()` passes `(final_text, i
 - **Match** → return the text, persist.
 - **Mismatch + writes present** → inject a `correction_message` into history, retry (capped at `max_retries=2`). The user sees the corrected version.
 - **Mismatch + reads only** → log to `audit_log`, return the text as-is (configurable via `verify_reads=False` to skip the LLM call entirely on read-only turns — cheaper).
+
+The verifier reads attacker-controllable tool output, so each result is run through `sanitize_tool_output()` and wrapped in a trust envelope before it reaches the judge, and the judge prompt instructs it to never obey instructions embedded in tool results — a poisoned result can't talk the integrity check into rubber-stamping a false claim.
+
+## Warden — pre-execution authorization
+
+Where SenseGate verifies *what happened* after a turn (soft, LLM-based), the **Warden** (`ambi/warden.py`) authorizes *what may happen* before it does (hard, deterministic). It holds an ordered list of policies; each returns `allow` / `deny` / `require_confirmation`; the first non-`allow` wins; every decision (including allows) is appended to `audit_log`. An empty Warden is a no-op (allow everything).
+
+`Agent._invoke_with_timeout` calls `warden.authorize(ctx)` before every tool handler:
+
+- **`deny`** → an error `ToolResultBlock` is returned; the handler never runs.
+- **`require_confirmation`** → the agent's optional async `confirm(ctx, decision)` hook is awaited. **Fail-closed:** if no confirmer is wired, or it returns False or raises, the call is declined (error result, not executed). `ambi chat` wires an interactive y/N confirmer that pauses the `Live` panel; the headless daemon wires none, so outbound actions fail closed there.
+
+Starter policies: `AllowlistPolicy`, `CommandAllowlistPolicy`, `ArgvValidatorPolicy` (case-insensitive substring **and** ordered-token-subsequence matching, so injected flags can't evade), `UrlAllowlistPolicy` (denies egress to non-allowlisted hosts found in argv — the exfil cut), `RequireConfirmationPolicy`, `CostCeilingPolicy`, `QuietHoursPolicy`. The default stack is assembled in `ambi/cli/build.py`.
+
+## Security — prompt-injection defense
+
+The primary threat is prompt injection via untrusted tool output. Defenses are layered across this codebase; the canonical reference is **[SECURITY.md](SECURITY.md)**. In brief:
+
+- **Trust envelope + sanitizer** (`ambi/types.py`): `sanitize_tool_output()` strips invisible/zero-width chars, Unicode "tag" smuggling, bidi overrides, NFKC-folds compatibility forms, and redacts plaintext injection markers; `wrap_tool_output()` wraps results in `<tool_output trust="data">`. Applied non-destructively in `Agent`'s context view (storage stays raw), in the SenseGate verifier, and in the compaction summarizer (whose output persists into future turns).
+- **System framing** (`ambi/cli/system.md`): tool outputs are data to reason about, never commands — including decoded/encoded payloads.
+- **Structural caps** (the Warden + `CommandPolicy`): `run_command` enforces an argv[0] allowlist (no `find`), forbidden-arg blocking (`-exec`/`-delete`), and a secret-path denylist (`.env`, `~/.ssh`, …); the Warden adds egress allowlisting and fail-closed confirmation. These hold even when the prompt-level defenses are bypassed.
 
 ## CLI
 

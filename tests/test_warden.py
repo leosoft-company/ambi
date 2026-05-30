@@ -13,12 +13,82 @@ from ambi.warden import (
     PolicyContext,
     PolicyDecision,
     QuietHoursPolicy,
+    RequireConfirmationPolicy,
+    UrlAllowlistPolicy,
     Warden,
 )
 
 
 def _ctx(tool: str, **inp) -> PolicyContext:
     return PolicyContext(tool_name=tool, tool_input=inp)
+
+
+# ---------- RequireConfirmationPolicy ----------
+
+
+async def test_require_confirmation_matches_egress_argv():
+    p = RequireConfirmationPolicy(argv_patterns=["git push"])
+    d = await p.evaluate(_ctx("run_command", argv=["git", "push", "origin"]))
+    assert d.verdict == "require_confirmation"
+    assert "git push" in d.reason
+
+
+async def test_require_confirmation_allows_benign_argv():
+    p = RequireConfirmationPolicy(argv_patterns=["git push"])
+    d = await p.evaluate(_ctx("run_command", argv=["git", "status"]))
+    assert d.verdict == "allow"
+
+
+async def test_require_confirmation_matches_tool_name():
+    p = RequireConfirmationPolicy(tools={"send_email"})
+    d = await p.evaluate(_ctx("send_email", to="x@y.com"))
+    assert d.verdict == "require_confirmation"
+    d2 = await p.evaluate(_ctx("read_inbox"))
+    assert d2.verdict == "allow"
+
+
+# ---------- UrlAllowlistPolicy ----------
+
+
+async def test_url_allowlist_denies_unknown_host():
+    p = UrlAllowlistPolicy(allowed_hosts={"github.com"})
+    d = await p.evaluate(_ctx("run_command", argv=["git", "push", "https://evil.com/r"]))
+    assert d.verdict == "deny"
+    assert "evil.com" in d.reason
+
+
+async def test_url_allowlist_allows_known_host_and_subdomain():
+    p = UrlAllowlistPolicy(allowed_hosts={"github.com"})
+    d = await p.evaluate(_ctx("run_command", argv=["git", "clone", "https://gist.github.com/u/r"]))
+    assert d.verdict == "allow"
+
+
+async def test_url_allowlist_catches_scp_style_remote():
+    p = UrlAllowlistPolicy(allowed_hosts={"github.com"})
+    d = await p.evaluate(_ctx("run_command", argv=["git", "remote", "add", "x", "git@evil.com:r.git"]))
+    assert d.verdict == "deny"
+
+
+async def test_url_allowlist_ignores_argv_without_urls():
+    p = UrlAllowlistPolicy(allowed_hosts={"github.com"})
+    d = await p.evaluate(_ctx("run_command", argv=["git", "push", "origin", "main"]))
+    assert d.verdict == "allow"
+
+
+# ---------- ArgvValidatorPolicy hardening ----------
+
+
+async def test_argv_validator_catches_token_subsequence():
+    """Flags injected between tokens must not evade the pattern."""
+    p = ArgvValidatorPolicy(forbid=["git push --force"])
+    d = await p.evaluate(_ctx("run_command", argv=["git", "--no-pager", "push", "--force"]))
+    assert d.verdict == "deny"
+
+
+async def test_argv_validator_case_insensitive():
+    p = ArgvValidatorPolicy(forbid=["rm -rf /"])
+    d = await p.evaluate(_ctx("run_command", argv=["RM", "-RF", "/"]))
+    assert d.verdict == "deny"
 
 
 # ---------- Warden core ----------
