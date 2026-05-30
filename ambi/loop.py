@@ -166,6 +166,12 @@ class Agent:
 
         invocations: list[ToolInvocation] = []
         retries_left = self.sensegate.max_retries if self.sensegate else 0
+        # A SenseGate correction turn asks the model to *restate* what already
+        # happened — it must not act again. We withhold tools on correction
+        # turns so the model can't re-invoke a side-effecting write that
+        # already ran (a retry must never double-send). Once correcting, every
+        # subsequent restatement turn stays tool-free for this chat() call.
+        correcting = False
 
         try:
             for _ in range(max_turns):
@@ -173,9 +179,10 @@ class Agent:
                 text_buf = ""
                 tool_calls: list[ToolCallChunk] = []
                 stop_reason = "end_turn"
+                turn_tools = [] if correcting else self.tools.defs()
                 async for chunk in self.provider.stream(
                     self._context_view(),
-                    self.tools.defs(),
+                    turn_tools,
                     system=self.system,
                     max_tokens=self.max_tokens,
                     **self.provider_kwargs,
@@ -216,6 +223,7 @@ class Agent:
                                     correction_message(verdict.reason)
                                 )
                                 retries_left -= 1
+                                correcting = True  # next turn is text-only
                                 continue
 
                     await self._persist_new()

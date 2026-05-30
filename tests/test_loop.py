@@ -434,6 +434,50 @@ async def test_sensegate_write_mismatch_triggers_retry():
     correction = agent.messages[-2]
     assert correction.role == "user"
     assert "SenseGate" in correction.content[0].text
+    # The correction (retry) turn must be tool-free so it can't re-invoke a
+    # write — the first two turns saw tools, the correction turn saw none.
+    assert provider.calls[0]["tools"] != []
+    assert provider.calls[2]["tools"] == []
+
+
+async def test_sensegate_retry_cannot_reexecute_write():
+    """A retry must not re-run a side-effecting write that already fired."""
+    verifier = _ScriptedVerifier(
+        [
+            Verdict(matches=False, reason="claimed success, verify"),
+            Verdict(matches=True, reason="ok"),
+        ]
+    )
+    gate = SenseGate(verifier)
+    tools = ToolRegistry()
+    sends: list[int] = []
+
+    async def send(_):
+        sends.append(1)
+        return "sent"
+
+    tools.register(_tool("send_thing", send, kind="write"))
+
+    provider = MockProvider(
+        [
+            CompletionResult(
+                content=[ToolUseBlock(id="w1", name="send_thing", input={})],
+                stop_reason="tool_use",
+            ),
+            CompletionResult(
+                content=[TextBlock("Sent it!")], stop_reason="end_turn",
+            ),
+            # If the retry turn were given tools, a model could re-issue the
+            # send here. With tools withheld it can only restate.
+            CompletionResult(
+                content=[TextBlock("Sent — receipt: sent.")], stop_reason="end_turn",
+            ),
+        ]
+    )
+    agent = Agent(provider=provider, tools=tools, system="s", sensegate=gate)
+    await agent.chat("send it")
+
+    assert sends == [1]  # executed exactly once despite the retry
 
 
 async def test_sensegate_write_retries_capped_at_max_retries():
