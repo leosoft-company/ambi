@@ -219,6 +219,19 @@ class TrackingProvider:
         self.inner = inner
         self.store = store
         self.session_id = session_id
+        # In-memory running totals across this provider's lifetime. Lets
+        # callers read usage synchronously without querying the store (used by
+        # the eval runner to attribute tokens/cost to a single scenario run).
+        self._acc_input = 0
+        self._acc_output = 0
+        self._acc_cost = 0.0
+
+    def usage_snapshot(self) -> tuple[int, int, float]:
+        """Cumulative (input_tokens, output_tokens, cost_usd) since creation.
+
+        Diff two snapshots around a call to attribute usage to that span.
+        """
+        return (self._acc_input, self._acc_output, self._acc_cost)
 
     async def complete(
         self,
@@ -257,6 +270,11 @@ class TrackingProvider:
         to_ = int(usage.get("output_tokens", 0) or 0)
         if ti == 0 and to_ == 0:
             return
+        # Accumulate in memory first — independent of the (best-effort) store
+        # write below, so a store failure doesn't lose the running totals.
+        self._acc_input += ti
+        self._acc_output += to_
+        self._acc_cost += compute_cost(model, ti, to_)
         try:
             await self.store.record(
                 session_id=self.session_id,

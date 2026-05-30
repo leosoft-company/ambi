@@ -775,7 +775,11 @@ async def _run_evals(args: argparse.Namespace) -> int:
     table.add_column("scenario", style="cyan")
     table.add_column("status", justify="center")
     table.add_column("pass/total", justify="right")
+    table.add_column("tokens (in/out)", justify="right")
+    table.add_column("cost", justify="right")
     pass_n = 0
+    tot_in = tot_out = 0
+    tot_cost = 0.0
     for r in results:
         passed = sum(1 for a in r.assertion_results if a.passed)
         total = len(r.assertion_results)
@@ -786,10 +790,16 @@ async def _run_evals(args: argparse.Namespace) -> int:
             pass_n += 1
         else:
             status = "[yellow]FAIL[/yellow]"
-        table.add_row(r.scenario.name, status, f"{passed}/{total}")
+        tot_in += r.input_tokens
+        tot_out += r.output_tokens
+        tot_cost += r.cost_usd
+        tokens = f"{r.input_tokens}/{r.output_tokens}" if (r.input_tokens or r.output_tokens) else "—"
+        cost = f"${r.cost_usd:.4f}" if r.cost_usd else "—"
+        table.add_row(r.scenario.name, status, f"{passed}/{total}", tokens, cost)
     console.print(table)
     console.print(
-        f"\n[bold]{pass_n}/{len(results)}[/bold] scenarios passed."
+        f"\n[bold]{pass_n}/{len(results)}[/bold] scenarios passed"
+        f" · [dim]{tot_in}/{tot_out} tokens · ${tot_cost:.4f} total[/dim]"
     )
     return 0 if pass_n == len(results) else 1
 
@@ -815,6 +825,11 @@ def _print_scenario_result(console, result) -> None:
             f"[dim]reply:[/dim] {result.response_text[:200]}"
             f"{'…' if len(result.response_text) > 200 else ''}\n"
         )
+        if result.input_tokens or result.output_tokens or result.cost_usd:
+            head.append(
+                f"[dim]usage:[/dim] {result.input_tokens} in / "
+                f"{result.output_tokens} out · ${result.cost_usd:.4f}\n"
+            )
         head.append("\n")
         for a in result.assertion_results:
             tick = "✓" if a.passed else "✗"

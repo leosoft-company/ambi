@@ -23,6 +23,7 @@ ambi-core/
 │   ├── scheduler.py                # TaskStore + Scheduler + schedule()/list/cancel tools
 │   ├── store.py                    # SqliteStore (durable session)
 │   ├── run_command.py              # allowlisted external commands (+ forbidden-arg / secret-path denylists)
+│   ├── evals.py                    # behavioral eval harness (scenarios, assertions, runner, setup)
 │   ├── mcp.py                      # McpServer + mcp_tools() — wrap any stdio MCP server
 │   ├── env.py                      # load_env, require_env
 │   ├── integrations/
@@ -30,11 +31,12 @@ ambi-core/
 │   ├── transports/
 │   │   └── telegram.py             # TelegramTransport (polling + streaming edits)
 │   └── cli/
-│       ├── main.py                 # `ambi` subcommands: init / run / chat / version
+│       ├── main.py                 # `ambi` subcommands: init / run / chat / eval / version
 │       ├── build.py                # opinionated build_agent() factory
 │       ├── paths.py                # ~/.ambi/ layout resolution (AMBI_HOME override)
 │       ├── system.md               # bundled default personality
 │       └── system_hippocamp.md     # appended when AMBI_USE_HIPPOCAMP=1
+├── evals/                          # behavioral scenarios (scenarios/*.yaml), run by `ambi eval`
 ├── examples/                       # raw library API demos (repl.py, telegram_bot.py)
 ├── tests/                          # pytest, asyncio-mode auto (305 unit + 3 live smoke)
 ├── docs/                           # demo SVG + render script
@@ -247,9 +249,39 @@ The primary threat is prompt injection via untrusted tool output. Defenses are l
 | `ambi init` | Seed `~/.ambi/` with `.env` template + `system.md`. Bundled skills are not copied — they ship with the package. |
 | `ambi chat` | Local REPL. Rich panels, prompt_toolkit input (bracketed paste, history), streaming. |
 | `ambi run` | Telegram daemon + scheduler. Persistent session shared with `ambi chat`. |
+| `ambi eval [path]` | Run behavioral scenarios (default `evals/scenarios/`) against a real provider; per-scenario panel + summary table; exit non-zero on any failure. See *Evals*. |
 | `ambi version` | Print version. |
 
 Env layering: `~/.ambi/.env` (defaults) → project-local `./.env` (overrides). Project file wins on conflicting keys; home file fills the rest.
+
+## Evals — behavioral testing
+
+Unit tests verify the harness; **evals** verify *behavior* — prompt-level regressions pytest can't see (e.g. "after editing `system.md`, does the agent still answer general knowledge without firing `recall_memory`?"). Lives in `ambi/evals.py`, driven by `ambi eval`.
+
+A **scenario** (`evals/scenarios/*.yaml`) is a `Scenario(input, assertions, setup)`:
+
+```yaml
+name: tool_followup_text
+description: After a tool call, the agent must still produce text.
+input: "What time is it in Tokyo right now?"
+assert:
+  - tool_called: get_current_time
+  - text_matches: '(?i)tokyo|jst|asia'
+  - text_not_matches: '^\s*$'
+```
+
+**Runner** (`run_scenario`): drives `agent.chat_stream(input)`, collecting `ToolUseEvent` names and the final `ChatComplete` text, then evaluates each assertion into an `AssertionResult`; a `ScenarioResult` passes iff no error and all assertions pass. Token/cost usage is attributed to the run by diffing `_usage_snapshot(agent)` before and after — it reads the `TrackingProvider`'s in-memory accumulator (`usage_snapshot()`), so the `max_*_tokens` / `max_cost_usd` assertions enforce real numbers and the report shows per-scenario tokens + cost. The CLI runs each scenario with a fresh `build_agent()` (no Hippocamp, no task store), retries empty-stream flakes up to `AMBI_EVAL_MAX_ATTEMPTS` (default 2), and renders a per-scenario panel + summary table.
+
+**Assertion types** (`check_assertion`): `text_contains` / `text_not_contains` (case-insensitive substring), `text_matches` / `text_not_matches` (regex), `tool_called` / `tool_not_called`, and `max_input_tokens` / `max_output_tokens` / `max_cost_usd`.
+
+**Setup blocks** (`apply_scenario_setup`, a context manager): seed per-scenario state in a temp dir, restored on exit. `setup.env` overrides environment variables (with `{tmp_dir}` substitution); `setup.prepare` runs registered actions. The built-in `create_obsidian_notes` seeds a vault; add your own via `register_prepare_action(name, fn)`.
+
+```yaml
+setup:
+  env: { OBSIDIAN_VAULT: "{tmp_dir}/vault" }
+  prepare:
+    - create_obsidian_notes: { count: 150, folders: [Inbox, Areas/Work] }
+```
 
 ## Concurrency
 

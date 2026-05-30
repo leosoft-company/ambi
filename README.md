@@ -28,6 +28,7 @@ Built as the runtime half of a personal-AI stack. Pair it with Hippocamp for lon
 | MCP integration  | `McpServer` + `mcp_tools()` wrap any stdio MCP server as ambi `Tool`s. Hippocamp ships as a worked example. |
 | Run-command      | Allowlisted external commands via `make_run_command_tool(CommandPolicy)`. Argv-only (no shell), cwd jail, timeout, output cap, forbidden-arg + secret-path denylists. |
 | Transports       | `TelegramTransport` — polling, allowlist auth, typing indicator, message splitting, reply-context extraction, `/scheduled` command. |
+| Evals            | Behavioral test harness. YAML scenarios (input + assertions on text/tools/cost) run against a real provider via `ambi eval`. Catches prompt regressions unit tests can't. See [Evals](#evals). |
 
 ## Setup (fresh machine)
 
@@ -132,6 +133,7 @@ Restart `ambi run` / `ambi chat`. The agent now has `recall_memory` / `update_me
 ```bash
 ambi chat       # local REPL (any directory)
 ambi run        # daemon (Telegram + scheduler)
+ambi eval       # run behavioral scenarios in evals/ (see Evals)
 ambi init       # idempotent — safe to re-run after upgrades
 ambi version    # print version
 ```
@@ -321,6 +323,59 @@ uv run pytest -m smoke         # live smoke against real Gemini (needs GEMINI_AP
 uv run pytest                  # both
 ```
 
+## Evals
+
+Unit tests cover the *harness*; **evals** cover *behavior* — they catch prompt
+regressions pytest can't. ("After editing `system.md`, does it still answer
+general knowledge without firing `recall_memory`? Does it still produce text
+after a tool call instead of an empty reply?") Each scenario runs against a
+real provider and is graded by inspecting the streamed events + final text.
+
+```bash
+ambi eval                          # run every scenario in evals/scenarios/
+ambi eval evals/scenarios/03_tool_followup_text.yaml   # one file
+ambi eval path/to/dir              # a custom directory
+```
+
+Needs `GEMINI_API_KEY`. Exit code is non-zero if any scenario fails (CI-friendly).
+Flaky empty streams are retried up to `AMBI_EVAL_MAX_ATTEMPTS` (default 2).
+
+A **scenario** is a YAML file: a user `input` plus a list of `assert`ions.
+
+```yaml
+name: tool_followup_text
+description: After a tool call, the agent must still produce text.
+input: "What time is it in Tokyo right now?"
+assert:
+  - tool_called: get_current_time
+  - text_matches: '(?i)tokyo|jst|asia'
+  - text_not_matches: '^\s*$'           # never an empty reply
+  - text_not_matches: '(?i)happy to help'
+```
+
+Assertion types: `text_contains`, `text_not_contains`, `text_matches`,
+`text_not_matches` (regex), `tool_called`, `tool_not_called`,
+`max_input_tokens`, `max_output_tokens`, `max_cost_usd`. The token/cost
+assertions bind to real per-scenario usage captured from the provider, and
+each scenario's tokens + cost are shown in the report and summary.
+
+A scenario can declare a **setup** block to seed state — environment overrides
+(`{tmp_dir}` is substituted) and `prepare` actions that build fixtures in a
+per-scenario temp dir (cleaned up after). The built-in `create_obsidian_notes`
+action seeds a vault; register your own with `register_prepare_action()`.
+
+```yaml
+setup:
+  env:
+    OBSIDIAN_VAULT: "{tmp_dir}/vault"
+  prepare:
+    - create_obsidian_notes: { count: 150, folders: [Inbox, Areas/Work] }
+input: "use obsidian_list to summarise my vault"
+assert:
+  - tool_called: obsidian_list
+  - text_not_matches: "(?i)clipped|cannot retrieve"
+```
+
 ## Project layout
 
 ```
@@ -342,13 +397,16 @@ ambi/
   scheduler.py        TaskStore + Scheduler + schedule()/list/cancel tools
   store.py            SqliteStore (durable session persistence)
   run_command.py      Allowlisted external commands (+ forbidden-arg / secret-path denylists)
+  evals.py            Behavioral eval harness (scenario model, assertions, runner, setup)
   mcp.py              McpServer + mcp_tools() wrapper
   integrations/
     hippocamp.py        MCP server wrapper for Hippocamp memory
   transports/
     telegram.py         Telegram polling + streaming progressive edits
-  cli/                `ambi` subcommands: init / run / chat / version
+  cli/                `ambi` subcommands: init / run / chat / eval / version
     system.md           bundled default personality
+evals/                Behavioral scenarios
+  scenarios/*.yaml      input + assertions, run by `ambi eval`
 examples/             Raw library API demos (repl.py, telegram_bot.py)
 tests/                pytest, asyncio-mode auto (305 unit + 3 live smoke)
 docs/                 Demo SVG + render script

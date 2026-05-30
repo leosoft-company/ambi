@@ -209,6 +209,9 @@ async def run_scenario(scenario: Scenario, agent: Agent) -> ScenarioResult:
     final_text = ""
     error: str | None = None
 
+    # Snapshot usage before/after so tokens + cost are attributed to *this*
+    # scenario's turn, even if the agent (and its TrackingProvider) is reused.
+    before = _usage_snapshot(agent)
     try:
         async for ev in agent.chat_stream(scenario.input):
             if isinstance(ev, ToolUseEvent):
@@ -218,10 +221,10 @@ async def run_scenario(scenario: Scenario, agent: Agent) -> ScenarioResult:
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 
-    # Try to pull token usage from the provider's most recent call. The
-    # exact mechanism depends on the provider being wrapped in
-    # TrackingProvider; if not, these stay zero.
-    input_tokens, output_tokens, cost_usd = _extract_usage_for(agent)
+    after = _usage_snapshot(agent)
+    input_tokens = after[0] - before[0]
+    output_tokens = after[1] - before[1]
+    cost_usd = after[2] - before[2]
 
     results = [
         check_assertion(
@@ -247,14 +250,20 @@ async def run_scenario(scenario: Scenario, agent: Agent) -> ScenarioResult:
     )
 
 
-def _extract_usage_for(agent: Agent) -> tuple[int, int, float]:
-    """Best-effort: walk the agent's recent message history for usage hints.
-
-    The TrackingProvider records to a separate store; we don't query that
-    here to keep run_scenario self-contained. Token counting from provider
-    responses is left to callers that want it.
+def _usage_snapshot(agent: Agent) -> tuple[int, int, float]:
+    """Cumulative (input_tokens, output_tokens, cost_usd) from the agent's
+    provider, if it's a TrackingProvider (duck-typed). Zeros otherwise — so
+    evals run fine against a bare provider, the cost/token assertions just
+    can't bind.
     """
-    return 0, 0, 0.0
+    snapshot = getattr(getattr(agent, "provider", None), "usage_snapshot", None)
+    if not callable(snapshot):
+        return 0, 0, 0.0
+    try:
+        ti, to_, cost = snapshot()
+        return int(ti), int(to_), float(cost)
+    except Exception:
+        return 0, 0, 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -336,6 +336,69 @@ def test_apply_scenario_setup_noop_for_empty_setup():
         assert tmp_dir is None
 
 
+# ---------- usage capture (run_scenario) ----------
+
+
+async def test_run_scenario_captures_usage_and_binds_assertions():
+    """run_scenario attributes real tokens/cost from the TrackingProvider, so
+    the max_*_tokens / max_cost_usd assertions actually enforce."""
+    from ambi.evals import Assertion, Scenario, run_scenario
+    from ambi.loop import Agent
+    from ambi.tool import ToolRegistry
+    from ambi.types import StreamEnd, TextChunk
+    from ambi.usage import TrackingProvider, UsageStore
+
+    from tests.mock_provider import MockStreamProvider
+
+    inner = MockStreamProvider([
+        [
+            TextChunk(text="Tokyo is GMT+9."),
+            StreamEnd(
+                stop_reason="end_turn",
+                usage={"input_tokens": 120, "output_tokens": 30,
+                       "model": "gemini-2.5-flash"},
+            ),
+        ],
+    ])
+    provider = TrackingProvider(inner=inner, store=UsageStore(":memory:"))
+    agent = Agent(provider=provider, tools=ToolRegistry(), system="s")
+
+    scen = Scenario(
+        name="usage", description="", input="time in tokyo?",
+        assertions=[
+            Assertion("max_output_tokens", 10),   # 30 > 10 → must FAIL now
+            Assertion("max_input_tokens", 1000),   # 120 <= 1000 → pass
+        ],
+    )
+    result = await run_scenario(scen, agent)
+
+    assert result.input_tokens == 120
+    assert result.output_tokens == 30
+    assert result.cost_usd > 0
+    by_type = {r.assertion.type: r.passed for r in result.assertion_results}
+    assert by_type["max_output_tokens"] is False   # actually enforced
+    assert by_type["max_input_tokens"] is True
+
+
+async def test_run_scenario_zero_usage_without_tracking_provider():
+    """A bare provider (no usage_snapshot) → zeros, evals still run."""
+    from ambi.evals import Scenario, run_scenario
+    from ambi.loop import Agent
+    from ambi.tool import ToolRegistry
+    from ambi.types import StreamEnd, TextChunk
+
+    from tests.mock_provider import MockStreamProvider
+
+    provider = MockStreamProvider([
+        [TextChunk(text="hi"), StreamEnd(stop_reason="end_turn")],
+    ])
+    agent = Agent(provider=provider, tools=ToolRegistry(), system="s")
+    result = await run_scenario(
+        Scenario(name="x", description="", input="hi", assertions=[]), agent
+    )
+    assert (result.input_tokens, result.output_tokens, result.cost_usd) == (0, 0, 0.0)
+
+
 def test_register_prepare_action():
     from ambi.evals import (
         Scenario, apply_scenario_setup, register_prepare_action,
